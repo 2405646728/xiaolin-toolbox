@@ -4,7 +4,7 @@
 // 优化命令：scan_junk / clean_junk / list_startup / kill_process / list_software / analyze_disk
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use sysinfo::{Disks, Networks, System};
 use walkdir::WalkDir;
 
@@ -81,7 +81,7 @@ fn get_system_info() -> SystemInfoPayload {
         .map(|p| ProcessInfo {
             name: p.name().to_string_lossy().into_owned(),
             cpu: p.cpu_usage(),
-            mem: *p.memory() as f64 / 1024.0 / 1024.0, // bytes -> MB
+            mem: p.memory() as f64 / 1024.0 / 1024.0, // bytes -> MB
         })
         .collect();
 
@@ -164,7 +164,7 @@ fn get_hardware_info() -> HardwarePayload {
         None => "未知".into(),
     };
     let os_version = System::os_version().unwrap_or_default();
-    let arch = System::cpu_arch();
+    let arch = System::cpu_arch().unwrap_or_else(|| "unknown".into());
 
     // CPU
     let cpus = sys.cpus();
@@ -276,7 +276,7 @@ struct ScanJunkResult {
 fn junk_dirs() -> Vec<(PathBuf, String)> {
     let mut dirs = Vec::new();
     // 用户临时目录
-    if let Some(tmp) = dirs::temp_dir().to_str().map(String::from) {
+    if let Some(tmp) = std::env::temp_dir().to_str().map(String::from) {
         dirs.push((PathBuf::from(tmp), "temp".into()));
     }
     // 系统临时目录
@@ -466,7 +466,7 @@ fn kill_processes(pids: Vec<u32>) -> Result<KillResult, String> {
     for pid in pids {
         if let Some(proc) = sys.process(sysinfo::Pid::from_u32(pid)) {
             let name = proc.name().to_string_lossy().into_owned();
-            let mem = *proc.memory();
+            let mem = proc.memory();
             // 保护系统关键进程
             let safe = !is_system_process(&name);
             if safe {
@@ -918,8 +918,8 @@ struct SecurityScanResult {
 #[tauri::command]
 fn scan_security() -> SecurityScanResult {
     let mut threats: Vec<SecurityThreat> = Vec::new();
-    let mut scanned_dirs = 0u32;
-    let mut scanned_files = 0u32;
+    let mut scanned_dirs = 0usize;
+    let mut scanned_files = 0usize;
 
     // 1. 扫描可疑启动项（命令路径可疑、指向 temp 目录等）
     let startup = list_startup();
@@ -1500,7 +1500,6 @@ fn scan_network_connections() -> NetworkScanResult {
     use std::process::Command;
     use std::collections::HashMap;
     let mut apps: Vec<NetworkConnProcess> = Vec::new();
-    let mut conn_counts: HashMap<String, u32> = HashMap::new();
     let mut total_conns: u32 = 0;
 
     #[cfg(target_os = "windows")]
@@ -1776,7 +1775,7 @@ fn scan_hosts() -> HostsScanResult {
             let parts: Vec<&str> = l.split_whitespace().collect();
             if parts.len() >= 2 {
                 let domain = parts[1].to_string();
-                let tag = if parts.len() >= 4 {
+                let _tag = if parts.len() >= 4 {
                     parts[3..].join(" ")
                 } else {
                     "已屏蔽".to_string()
@@ -2222,7 +2221,7 @@ fn oppo_check_adb() -> OppoDeviceStatus {
         adb_path: adb_path_str,
         device_connected: true,
         device_serial: serial,
-        is_oppo_findx8s,
+        is_oppo_findx8s: is_findx8s,
         message,
     }
 }
@@ -2671,11 +2670,12 @@ fn oppo_coloros_clean(action: String, packages: Vec<String>) -> Result<ColorOSCl
                     }
                 }
             }
+            let details_count = details.len();
             Ok(ColorOSCleanResult {
-                cleaned: details.len() as u32,
+                cleaned: details_count as u32,
                 freed_mb: total,
                 details,
-                message: format!("发现 {} 个可清理目录，约 {} MB", details.len(), total),
+                message: format!("发现 {} 个可清理目录，约 {} MB", details_count, total),
             })
         }
         "clean_cache" => {
@@ -2721,9 +2721,13 @@ fn oppo_coloros_clean(action: String, packages: Vec<String>) -> Result<ColorOSCl
             ];
             let mut count = 0u32;
             let mut details: Vec<String> = Vec::new();
-            let target = if packages.is_empty() { bloatware.to_vec() } else { packages.clone() };
+            let target: Vec<String> = if packages.is_empty() {
+                bloatware.iter().map(|s| s.to_string()).collect()
+            } else {
+                packages.clone()
+            };
             for pkg in &target {
-                let r = adb_exec(&["shell", "pm", "disable-user", "--user", "0", pkg]);
+                let r = adb_exec(&["shell", "pm", "disable-user", "--user", "0", pkg.as_str()]);
                 if r.is_ok() {
                     count += 1;
                     details.push(format!("已禁用 {}", pkg));
@@ -2743,7 +2747,7 @@ fn oppo_coloros_clean(action: String, packages: Vec<String>) -> Result<ColorOSCl
             let mut count = 0u32;
             let mut details: Vec<String> = Vec::new();
             for pkg in &packages {
-                let r = adb_exec(&["shell", "pm", "enable", pkg]);
+                let r = adb_exec(&["shell", "pm", "enable", pkg.as_str()]);
                 if r.is_ok() {
                     count += 1;
                     details.push(format!("已恢复 {}", pkg));
