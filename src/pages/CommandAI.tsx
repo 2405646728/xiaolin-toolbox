@@ -1,11 +1,10 @@
-// 小林 AI 命令助手：聊天式交互界面（三栏布局）
+// 小林 AI · 对话型 AI 助手主界面
 // 左：分类侧栏（默认显示）  中：当前分类命令列表  右：聊天流 + 输入框
 // 本地智能解析器识别关键词并执行真实操作（Tauri 桌面环境）
 import { useState, useRef, useEffect, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  ArrowLeft, Send, Sparkles, User, Trash2, Loader2,
+  Send, Sparkles, User, Trash2, Loader2,
   AlertTriangle, CheckCircle2, Info, X, Search, PanelLeftClose, PanelLeftOpen,
   Power, RotateCw, Moon, Lock, LogOut, XCircle, RefreshCw, Trash2 as TrashIcon,
   Calculator, FileText, Folder, Activity, Database, Terminal, TerminalSquare,
@@ -60,12 +59,11 @@ interface ChatMessage {
 }
 
 export default function CommandAI() {
-  const navigate = useNavigate();
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 0,
       role: "ai",
-      text: "你好！我是小林 AI 助手。\n\n我集成了 70+ 实用功能，覆盖系统控制、快捷启动、网络工具、编码转换、文本处理、时间日期、数学计算、单位换算、颜色工具、开发工具、文件操作、剪贴板等。\n\n左侧点分类查看命令，或直接在下方输入命令。输入「帮助」查看完整列表。",
+      text: "你好！我是小林 AI。\n\n我集成了 70+ 实用功能，覆盖系统控制、快捷启动、网络工具、编码转换、文本处理、时间日期、数学计算、单位换算、颜色工具、开发工具、文件操作、剪贴板等。\n\n左侧点分类查看命令，或直接在下方输入。输入「帮助」查看完整列表。",
       status: "info",
       timestamp: Date.now(),
     },
@@ -165,14 +163,11 @@ export default function CommandAI() {
         className="flex shrink-0 items-center justify-between gap-3"
       >
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-          <LiquidButton size="sm" variant="ghost" onClick={() => navigate("/")} className="shrink-0 px-2.5">
-            <ArrowLeft className="h-4 w-4" />
-          </LiquidButton>
           <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl glass-tile-strong glass-tile-edge glass-shine text-titanium-500">
             <Sparkles className="relative z-10 h-5 w-5" />
           </div>
           <div className="flex min-w-0 flex-col">
-            <h1 className="truncate text-base font-semibold text-white">小林 AI 助手</h1>
+            <h1 className="truncate text-base font-semibold text-white">小林 AI</h1>
             <span className="truncate text-[11px] text-argent-400">
               {aiCommands.length} 个命令 · 本地智能解析
             </span>

@@ -1192,7 +1192,7 @@ export function chatReply(input: string): AIResponse {
   // 你是谁
   if (/(你是谁|你叫什么|你的名字|who are you)/.test(lower)) {
     return {
-      text: "我是小林 AI 助手，集成在小林的工具箱中的智能命令助手。我可以帮你执行系统操作、快捷启动程序、处理文本、查询信息等。输入「帮助」查看完整功能列表。",
+      text: "我是小林 AI，一个对话型 AI 助手。我可以帮你执行系统操作、快捷启动程序、处理文本、查询信息等。输入「帮助」查看完整功能列表。",
       status: "info",
     };
   }
