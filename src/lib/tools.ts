@@ -355,7 +355,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "search_web",
-      description: "用默认浏览器搜索关键词（默认 Bing 搜索引擎）。",
+      description: "用默认浏览器的搜索引擎（Bing）搜索关键词，会新开一个搜索结果页。\n\n注意：此工具只适合「用搜索引擎搜索」。如果用户要求「在某个网站里搜索」（如「在B站搜索XX」「在淘宝搜索YY」），不要用此工具，而应该：open_url 打开该网站 → screenshot 截屏 → mouse_click 点击站内搜索框 → keyboard_type 输入关键词 → keyboard_press Enter。",
       parameters: {
         type: "object",
         properties: {

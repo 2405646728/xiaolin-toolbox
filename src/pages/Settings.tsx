@@ -816,7 +816,7 @@ function AboutTab() {
             <h2 className="text-lg font-semibold text-white">小林 AI</h2>
             <div className="mt-0.5 flex items-center gap-2">
               <span className="rounded-full bg-titanium-500/15 border border-titanium-500/30 px-2 py-0.5 text-[11px] text-titanium-300">
-                v1.1.1
+                v1.1.2
               </span>
               <span className="text-xs text-argent-400">桌面 AI 助手</span>
             </div>
