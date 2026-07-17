@@ -7,7 +7,7 @@
 //   3. 最大步数兜底（默认 20），避免无限循环；中断信号随时可停止
 //   4. 所有回调 try/catch 包裹，回调异常不影响主流程
 
-import { chatCompletion, type ChatMessage, type LLMConfig } from "./llm";
+import { chatCompletion, visionChat, type ChatMessage, type LLMConfig } from "./llm";
 import {
   executeTool,
   TOOL_DEFINITIONS,
@@ -406,28 +406,75 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
         // ---- 把 tool result 追加到 messages ----
         if (screenshotBase64) {
-          // 视觉工具：tool result 简化 + 追加多模态视觉消息
-          // 这样下一步 chatCompletion 调用时，模型能看到截图
-          workingMessages.push({
-            role: "tool",
-            content: "已截屏，画面已作为图片发送给你",
-            tool_call_id: toolCallId,
-          });
-          workingMessages.push({
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "这是刚才截屏的画面，请根据屏幕内容决定下一步操作。",
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:image/png;base64,${screenshotBase64}`,
+          // 截屏后，需要让模型"看到"屏幕内容
+          // 判断当前文本模型是否支持视觉（model === visionModel 时认为支持）
+          const textModelSupportsVision =
+            config.visionModel && config.model === config.visionModel;
+
+          if (textModelSupportsVision) {
+            // 当前模型本身支持视觉：直接发多模态消息
+            workingMessages.push({
+              role: "tool",
+              content: "已截屏，画面已作为图片发送给你",
+              tool_call_id: toolCallId,
+            });
+            workingMessages.push({
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "这是刚才截屏的画面，请根据屏幕内容决定下一步操作。",
                 },
-              },
-            ],
-          } as any);
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:image/png;base64,${screenshotBase64}`,
+                  },
+                },
+              ],
+            } as any);
+          } else if (config.visionModel) {
+            // 配置了独立的视觉模型：用 visionChat 分析截图，把文字描述返回给文本模型
+            let screenshotDescription = "";
+            try {
+              const visionResult = await visionChat({
+                config,
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      {
+                        type: "text",
+                        text: "请简洁描述这个屏幕截图中的关键内容，重点说明：1) 当前打开了什么窗口/网页 2) 搜索框、输入框、按钮等可交互元素的大致位置（用屏幕坐标描述，如「顶部中央约(600,50)有搜索框」）3) 页面上可见的文字内容。300字以内。",
+                      },
+                      {
+                        type: "image_url",
+                        image_url: {
+                          url: `data:image/png;base64,${screenshotBase64}`,
+                        },
+                      },
+                    ],
+                  },
+                ],
+                signal,
+              });
+              screenshotDescription = visionResult.content;
+            } catch {
+              screenshotDescription = "（视觉模型分析截图失败，可能视觉模型未启动）";
+            }
+            workingMessages.push({
+              role: "tool",
+              content: `已截屏。截图内容描述（由视觉模型分析）：${screenshotDescription}`,
+              tool_call_id: toolCallId,
+            });
+          } else {
+            // 未配置视觉模型：降级为纯文本提示
+            workingMessages.push({
+              role: "tool",
+              content: "已截屏，但未配置视觉模型，无法分析截图内容。请在设置中配置视觉模型（如 llava:7b、gpt-4o）以启用视觉能力。",
+              tool_call_id: toolCallId,
+            });
+          }
         } else {
           // 普通工具：直接 JSON.stringify(result)
           workingMessages.push({
