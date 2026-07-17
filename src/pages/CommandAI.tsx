@@ -1,407 +1,552 @@
-// 小林 AI · 对话型 AI 助手主界面
-// 左：分类侧栏（默认显示）  中：当前分类命令列表  右：聊天流 + 输入框
-// 本地智能解析器识别关键词并执行真实操作（Tauri 桌面环境）
-import { useState, useRef, useEffect, useMemo } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+// 小林 AI · 主对话界面
+// 整合 LLM + ReAct Agent + 工具桥接 + 多对话管理 + 用量监控
+// 在线模式：调用 runAgent 执行 ReAct 循环（thinking → tool_call → result → final）
+// 离线模式：用 aiCommands.matchCommand 本地解析（降级方案，70+ 命令）
+
+import { useState, useRef, useEffect, useCallback } from "react";
+import { motion } from "framer-motion";
 import {
-  Send, Sparkles, User, Trash2, Loader2,
-  AlertTriangle, CheckCircle2, Info, X, Search, PanelLeftClose, PanelLeftOpen,
-  Power, RotateCw, Moon, Lock, LogOut, XCircle, RefreshCw, Trash2 as TrashIcon,
-  Calculator, FileText, Folder, Activity, Database, Terminal, TerminalSquare,
-  Paintbrush, Settings, Cpu, Scissors, Clock, Keyboard, ZoomIn, Type as TypeIcon,
-  Globe, Search as SearchIcon, Link as LinkIcon, Gauge, Plug, Route,
-  Binary, Hash, Fingerprint, Code, Languages, KeyRound,
-  CaseSensitive, Braces, ArrowLeftRight, ListChecks, ArrowDownUp, Replace, Regex,
-  Calendar, CalendarDays, Timer, TrendingUp,
-  Square, ChevronsUp, Triangle, Dices, BarChart3,
-  Ruler, Weight, Thermometer,
-  Palette, Pipette, Eye, Blend,
-  GitBranch, Hexagon, Package, AlignLeft, Server,
-  FolderOpen, List, FolderPlus, FileSearch,
-  Copy, ClipboardPaste, Eraser, Clipboard,
-  Monitor, BatteryCharging, Wifi, HelpCircle,
+  Send, Sparkles, User, Settings as SettingsIcon,
+  AlertTriangle, CheckCircle2, Loader2,
+  PanelLeftClose, PanelLeftOpen, Square, WifiOff, Eraser,
 } from "lucide-react";
 import { GlassCard } from "@/components/glass/GlassCard";
 import { LiquidButton } from "@/components/liquid/LiquidButton";
+import { GlassButton } from "@/components/glass/GlassButton";
+import { ConversationSidebar } from "@/components/ConversationSidebar";
+import { TaskProgress } from "@/components/TaskProgress";
+import { UsageBadge } from "@/components/UsageBadge";
 import { cn } from "@/lib/utils";
+import { runAgent, SYSTEM_PROMPT, type AgentStep } from "@/lib/agent";
 import {
-  aiCommands, commandCategories,
+  loadLLMConfig,
+  type LLMConfig, type ChatMessage as LLMChatMessage,
+  AuthError, NetworkError, RateLimitError, QuotaError,
+} from "@/lib/llm";
+import {
+  createConversation, getConversation, getCurrentConversationId,
+  setCurrentConversationId, deleteConversation, clearMessages,
+  appendMessage, updateConversation, generateConversationTitle,
+  listConversations,
+  type ConversationMessage,
+} from "@/lib/conversations";
+import {
   matchCommand, executeCommand, chatReply,
-  type AICommand, type AIResponse,
+  type AIResponse,
 } from "@/lib/aiCommands";
 
-// 图标映射
-const iconMap: Record<string, typeof Power> = {
-  Power, RotateCw, Moon, Lock, LogOut, XCircle, RefreshCw, Trash2: TrashIcon,
-  Calculator, FileText, Folder, Activity, Database, Terminal, TerminalSquare,
-  Paintbrush, Settings, Cpu, Scissors, Clock, Keyboard, ZoomIn, Type: TypeIcon,
-  Globe, Search: SearchIcon, Link: LinkIcon, Gauge, Plug, Route,
-  Binary, Hash, Fingerprint, Code, Languages, KeyRound,
-  CaseSensitive, Braces, ArrowLeftRight, ListChecks, ArrowDownUp, Replace, Regex,
-  Calendar, CalendarDays, Timer, TrendingUp,
-  Square, ChevronsUp, Triangle, Dices, BarChart3,
-  Ruler, Weight, Thermometer,
-  Palette, Pipette, Eye, Blend,
-  GitBranch, Hexagon, Package, AlignLeft, Server,
-  FolderOpen, List, FolderPlus, FileSearch,
-  Copy, ClipboardPaste, Eraser, Clipboard,
-  Monitor, BatteryCharging, Wifi, HelpCircle,
-  Info,
-};
+// ---------- 类型与常量 ----------
 
-interface ChatMessage {
-  id: number;
+export interface CommandAIProps {
+  onOpenSettings?: () => void;
+}
+
+// UI 消息模型：支持用户文本 / AI 文本 / AI 任务步骤
+interface UIMessage {
+  id: string;
   role: "user" | "ai";
-  text: string;
-  status?: AIResponse["status"];
-  executed?: boolean;
+  text?: string;                 // 用户消息 / AI 最终文本（离线模式结果）
+  steps?: AgentStep[];           // AI ReAct 步骤（仅在线模式 AI 消息）
+  isRunning?: boolean;           // 任务执行中
+  status?: AIResponse["status"]; // 离线模式命令状态
+  executed?: boolean;            // 离线模式是否真实执行
   timestamp: number;
 }
 
-export default function CommandAI() {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 0,
-      role: "ai",
-      text: "你好！我是小林 AI。\n\n我集成了 70+ 实用功能，覆盖系统控制、快捷启动、网络工具、编码转换、文本处理、时间日期、数学计算、单位换算、颜色工具、开发工具、文件操作、剪贴板等。\n\n左侧点分类查看命令，或直接在下方输入。输入「帮助」查看完整列表。",
-      status: "info",
-      timestamp: Date.now(),
-    },
-  ]);
+const QUICK_COMMANDS = ["截屏看看", "打开记事本", "搜索周杰伦", "当前时间", "获取系统状态"];
+const MAX_STEPS = 20;
+const WELCOME_TEXT = "你好！我是小林 AI，能自主操控你的电脑完成复杂任务。\n\n告诉我你想做什么，例如：\n· 「去 B 站搜索周杰伦并点赞」\n· 「打开记事本写一份会议纪要」\n· 「整理下载文件夹」\n\n未配置 API 时自动切换为离线命令模式（70+ 本地命令）。";
+
+function genId(): string {
+  return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function makeWelcome(): UIMessage {
+  return { id: genId(), role: "ai", text: WELCOME_TEXT, status: "info", timestamp: Date.now() };
+}
+
+// ConversationMessage → UIMessage 转换（用于加载历史对话）
+function convMsgToUIMsg(m: ConversationMessage): UIMessage {
+  return {
+    id: m.id,
+    role: m.role === "user" ? "user" : "ai",
+    text: m.content || undefined,
+    status: m.role === "assistant" ? "info" : undefined,
+    timestamp: m.timestamp,
+  };
+}
+
+// 错误友好提示
+function friendlyError(err: any): string {
+  if (err instanceof AuthError) return `🔐 ${err.message}`;
+  if (err instanceof NetworkError) return `🌐 ${err.message}`;
+  if (err instanceof RateLimitError) return `⏱️ ${err.message}`;
+  if (err instanceof QuotaError) return `💰 ${err.message}`;
+  if (err?.name === "AbortError") return "（任务已停止）";
+  return `❌ ${err?.message || "未知错误"}`;
+}
+
+// ---------- 主组件 ----------
+
+export default function CommandAI({ onOpenSettings }: CommandAIProps) {
+  const [messages, setMessages] = useState<UIMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [activeCategory, setActiveCategory] = useState<string>("system");
-  const [showPanel, setShowPanel] = useState(true); // 左侧面板默认显示
-  const [search, setSearch] = useState("");
-  const msgIdRef = useRef(1);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [currentConversationId, setCurrentConvId] = useState<string | null>(null);
+  const [llmConfig, setLlmConfig] = useState<LLMConfig | null>(null);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  // 消息列表的 ref 镜像，供回调中读取最新值（避免闭包陷阱）
+  const messagesRef = useRef<UIMessage[]>([]);
+  messagesRef.current = messages;
+
+  const isOnline = llmConfig !== null;
+
+  // 初始化：加载 LLM 配置 + 加载或创建当前对话
+  useEffect(() => {
+    setLlmConfig(loadLLMConfig());
+
+    let convId = getCurrentConversationId();
+    let conv = convId ? getConversation(convId) : null;
+    if (!conv) {
+      conv = createConversation("新对话");
+      convId = conv.id;
+      setCurrentConversationId(convId);
+    }
+    setCurrentConvId(convId);
+
+    const uiMsgs = conv.messages.map(convMsgToUIMsg);
+    setMessages(uiMsgs.length > 0 ? uiMsgs : [makeWelcome()]);
+  }, []);
 
   // 自动滚动到底部
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: "smooth",
+    });
   }, [messages, loading]);
 
-  const handleSend = async (text?: string) => {
-    const content = (text ?? input).trim();
-    if (!content || loading) return;
-    setInput("");
-    setLoading(true);
+  // 重新读取 LLM 配置（每次发送前调用，以应用设置页改动）
+  const reloadConfig = useCallback(() => {
+    const cfg = loadLLMConfig();
+    setLlmConfig(cfg);
+    return cfg;
+  }, []);
 
-    const userMsg: ChatMessage = {
-      id: msgIdRef.current++,
-      role: "user",
-      text: content,
-      timestamp: Date.now(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
+  // 更新指定消息（按 id）
+  const updateMessage = useCallback((id: string, patch: Partial<UIMessage>) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, ...patch } : m))
+    );
+  }, []);
 
-    await new Promise((r) => setTimeout(r, 400 + Math.random() * 600));
+  // 追加步骤到指定 AI 消息
+  const appendStep = useCallback((id: string, step: AgentStep) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === id ? { ...m, steps: [...(m.steps ?? []), step] } : m
+      )
+    );
+  }, []);
 
-    const cmd = matchCommand(content);
-    let aiResp: AIResponse;
-    if (cmd) {
-      aiResp = await executeCommand(cmd, content);
-    } else {
-      aiResp = chatReply(content);
-    }
+  // 发送消息
+  const handleSend = useCallback(
+    async (text?: string) => {
+      const content = (text ?? input).trim();
+      if (!content || loading) return;
 
-    const aiMsg: ChatMessage = {
-      id: msgIdRef.current++,
-      role: "ai",
-      text: aiResp.text,
-      status: aiResp.status,
-      executed: aiResp.executed,
-      timestamp: Date.now(),
-    };
-    setMessages((prev) => [...prev, aiMsg]);
-    setLoading(false);
-  };
+      setInput("");
+      setLoading(true);
 
-  const handleQuickCommand = (cmd: AICommand) => {
-    if (cmd.danger) {
-      if (!window.confirm(`⚠️ 即将执行危险操作：${cmd.title}\n\n${cmd.description}\n\n确认继续？`)) {
-        return;
-      }
-    }
-    handleSend(cmd.keywords[0]);
-  };
-
-  const handleClear = () => {
-    setMessages([
-      {
-        id: msgIdRef.current++,
+      const now = Date.now();
+      const userMsg: UIMessage = {
+        id: genId(),
+        role: "user",
+        text: content,
+        timestamp: now,
+      };
+      const aiMsgId = genId();
+      const aiMsg: UIMessage = {
+        id: aiMsgId,
         role: "ai",
-        text: "对话已清空。有什么可以帮你的？",
-        status: "info",
-        timestamp: Date.now(),
-      },
-    ]);
-  };
+        steps: [],
+        isRunning: true,
+        timestamp: now + 1,
+      };
+      setMessages((prev) => [...prev, userMsg, aiMsg]);
 
-  // 当前分类命令（支持搜索过滤）
-  const currentCommands = useMemo(() => {
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      return aiCommands.filter(
-        (c) =>
-          c.title.toLowerCase().includes(q) ||
-          c.keywords.some((k) => k.toLowerCase().includes(q)) ||
-          c.description.toLowerCase().includes(q)
-      );
+      // 持久化用户消息到对话
+      const convId = currentConversationId;
+      if (convId) {
+        appendMessage(convId, {
+          id: userMsg.id,
+          role: "user",
+          content,
+          timestamp: now,
+        });
+        // 首条消息自动生成对话标题
+        const conv = getConversation(convId);
+        if (conv && conv.messages.length <= 1) {
+          const title = await generateConversationTitle(content);
+          updateConversation(convId, { title });
+        }
+      }
+
+      const cfg = reloadConfig();
+      if (cfg) {
+        await runAgentFlow(cfg, aiMsgId, content, convId);
+      } else {
+        await offlineFlow(aiMsgId, content, convId);
+      }
+
+      setLoading(false);
+      setRefreshTrigger((v) => v + 1);
+    },
+    [input, loading, currentConversationId, reloadConfig]
+  );
+
+  // 在线模式：ReAct Agent 流程
+  const runAgentFlow = useCallback(
+    async (cfg: LLMConfig, aiMsgId: string, userText: string, convId: string | null) => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      // 构造上下文消息：system + 最近 10 条历史 + 当前用户消息
+      const historyMessages: LLMChatMessage[] = [
+        { role: "system", content: SYSTEM_PROMPT },
+      ];
+      const recent = messagesRef.current
+        .filter((m) => m.id !== aiMsgId && m.text && m.role === "user")
+        .slice(-10);
+      for (const m of recent) {
+        historyMessages.push({
+          role: "user",
+          content: m.text || "",
+        });
+      }
+      historyMessages.push({ role: "user", content: userText });
+
+      try {
+        await runAgent({
+          config: cfg,
+          messages: historyMessages,
+          conversationId: convId ?? undefined,
+          maxSteps: MAX_STEPS,
+          signal: controller.signal,
+          callbacks: {
+            // 统一通过 onStep 推送步骤到 UI
+            onStep: (step) => {
+              appendStep(aiMsgId, step);
+              // final 步骤：标记完成 + 持久化 AI 回复
+              if (step.type === "final") {
+                const finalText = step.content || "";
+                updateMessage(aiMsgId, {
+                  text: finalText,
+                  isRunning: false,
+                });
+                if (convId && finalText) {
+                  appendMessage(convId, {
+                    id: aiMsgId,
+                    role: "assistant",
+                    content: finalText,
+                    timestamp: Date.now(),
+                  });
+                }
+              } else if (step.type === "error") {
+                // 错误步骤：标记失败
+                updateMessage(aiMsgId, {
+                  text: step.content,
+                  isRunning: false,
+                });
+              }
+            },
+            onScreenshot: () => setRefreshTrigger((v) => v + 1),
+          },
+        });
+      } catch (err: any) {
+        // 中断错误由 onStep 的 error 步骤处理，此处兜底
+        const msg = messagesRef.current.find((m) => m.id === aiMsgId);
+        if (msg && msg.isRunning) {
+          updateMessage(aiMsgId, {
+            text: friendlyError(err),
+            isRunning: false,
+          });
+        }
+      } finally {
+        abortRef.current = null;
+        updateMessage(aiMsgId, { isRunning: false });
+      }
+    },
+    [appendStep, updateMessage]
+  );
+
+  // 离线模式：本地命令解析
+  const offlineFlow = useCallback(
+    async (aiMsgId: string, userText: string, convId: string | null) => {
+      // 模拟思考延迟
+      await new Promise((r) => setTimeout(r, 300 + Math.random() * 400));
+
+      const cmd = matchCommand(userText);
+      let resp: AIResponse;
+      if (cmd) {
+        resp = await executeCommand(cmd, userText);
+      } else {
+        resp = chatReply(userText);
+      }
+
+      updateMessage(aiMsgId, {
+        text: resp.text,
+        status: resp.status,
+        executed: resp.executed,
+        isRunning: false,
+      });
+
+      // 持久化 AI 回复
+      if (convId) {
+        appendMessage(convId, {
+          id: aiMsgId,
+          role: "assistant",
+          content: resp.text,
+          timestamp: Date.now(),
+        });
+      }
+    },
+    [updateMessage]
+  );
+
+  // 停止生成
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setLoading(false);
+    // 立即更新 UI（agent 的 error 步骤会随后到达）
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.isRunning
+          ? { ...m, isRunning: false, text: m.text || "（已停止）" }
+          : m
+      )
+    );
+  }, []);
+
+  // 清空当前对话
+  const handleClear = useCallback(() => {
+    if (!currentConversationId) return;
+    if (!window.confirm("确认清空当前对话的所有消息？")) return;
+    clearMessages(currentConversationId);
+    setMessages([makeWelcome()]);
+    setRefreshTrigger((v) => v + 1);
+  }, [currentConversationId]);
+
+  // 新建对话
+  const handleNewConversation = useCallback(() => {
+    const conv = createConversation("新对话");
+    setCurrentConversationId(conv.id);
+    setCurrentConvId(conv.id);
+    setMessages([makeWelcome()]);
+    setRefreshTrigger((v) => v + 1);
+  }, []);
+
+  // 切换对话
+  const handleSelectConversation = useCallback((id: string) => {
+    setCurrentConversationId(id);
+    setCurrentConvId(id);
+    const conv = getConversation(id);
+    if (conv) {
+      const uiMsgs = conv.messages.map(convMsgToUIMsg);
+      setMessages(uiMsgs.length > 0 ? uiMsgs : [makeWelcome()]);
     }
-    return aiCommands.filter((c) => c.category === activeCategory);
-  }, [activeCategory, search]);
+    setRefreshTrigger((v) => v + 1);
+  }, []);
 
-  const activeCatInfo = commandCategories.find((c) => c.id === activeCategory);
+  // 删除对话
+  const handleDeleteConversation = useCallback(
+    (id: string) => {
+      if (!window.confirm("确认删除此对话？")) return;
+      deleteConversation(id);
+      if (id === currentConversationId) {
+        const remaining = listConversations();
+        if (remaining.length > 0) {
+          handleSelectConversation(remaining[0].id);
+        } else {
+          handleNewConversation();
+        }
+      }
+      setRefreshTrigger((v) => v + 1);
+    },
+    [currentConversationId, handleSelectConversation, handleNewConversation]
+  );
 
   return (
     <div className="relative flex h-full flex-col gap-3 overflow-hidden sm:gap-4">
-      {/* 顶部：返回 + 标题 + 工具栏 */}
+      {/* ============ 顶部状态栏 ============ */}
       <motion.header
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
         className="flex shrink-0 items-center justify-between gap-3"
       >
-        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-          <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl glass-tile-strong glass-tile-edge glass-shine text-titanium-500">
-            <Sparkles className="relative z-10 h-5 w-5" />
+        {/* 左：折叠/展开侧栏按钮 */}
+        <GlassButton
+          variant="ghost"
+          size="sm"
+          onClick={() => setSidebarOpen((v) => !v)}
+          className="shrink-0 px-2.5"
+          title={sidebarOpen ? "折叠侧栏" : "展开侧栏"}
+        >
+          {sidebarOpen ? (
+            <PanelLeftClose className="h-4 w-4" />
+          ) : (
+            <PanelLeftOpen className="h-4 w-4" />
+          )}
+        </GlassButton>
+
+        {/* 中：应用名 + 模型名 + 在线状态 */}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl glass-tile-strong glass-tile-edge glass-shine text-titanium-500">
+            <Sparkles className="relative z-10 h-4 w-4" />
           </div>
           <div className="flex min-w-0 flex-col">
-            <h1 className="truncate text-base font-semibold text-white">小林 AI</h1>
-            <span className="truncate text-[11px] text-argent-400">
-              {aiCommands.length} 个命令 · 本地智能解析
-            </span>
+            <h1 className="truncate text-sm font-semibold text-white">小林 AI</h1>
+            <div className="flex items-center gap-1.5 text-[11px]">
+              <span className="truncate text-argent-400">
+                {isOnline ? llmConfig?.model || "未配置模型" : "离线模式"}
+              </span>
+              <OnlineIndicator online={isOnline} />
+            </div>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {/* 桌面端：切换面板挤压 */}
-          <LiquidButton
-            size="sm"
+
+        {/* 右：用量徽章 + 停止 + 清空 + 设置 */}
+        <div className="flex shrink-0 items-center gap-1.5">
+          <UsageBadge
+            conversationId={currentConversationId ?? undefined}
+            refreshTrigger={refreshTrigger}
+            className="hidden sm:inline-flex"
+          />
+          {loading && (
+            <GlassButton
+              variant="danger"
+              size="sm"
+              onClick={handleStop}
+              className="shrink-0 px-2.5"
+              title="停止生成"
+            >
+              <Square className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">停止</span>
+            </GlassButton>
+          )}
+          <GlassButton
             variant="ghost"
-            onClick={() => setShowPanel((v) => !v)}
-            className="hidden px-2.5 md:inline-flex"
-            title={showPanel ? "隐藏面板" : "显示面板"}
-          >
-            {showPanel ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
-          </LiquidButton>
-          {/* 移动端：打开面板浮层 */}
-          <LiquidButton
             size="sm"
-            variant="ghost"
-            onClick={() => setShowPanel(true)}
-            className="px-2.5 md:hidden"
-            title="打开命令面板"
+            onClick={handleClear}
+            className="shrink-0 px-2.5"
+            title="清空对话"
           >
-            <PanelLeftOpen className="h-4 w-4" />
-          </LiquidButton>
-          <LiquidButton size="sm" variant="ghost" onClick={handleClear} className="px-2.5" title="清空对话">
-            <Trash2 className="h-4 w-4" />
-          </LiquidButton>
+            <Eraser className="h-4 w-4" />
+          </GlassButton>
+          <GlassButton
+            variant="ghost"
+            size="sm"
+            onClick={() => onOpenSettings?.()}
+            className="shrink-0 px-2.5"
+            title="设置"
+          >
+            <SettingsIcon className="h-4 w-4" />
+          </GlassButton>
         </div>
       </motion.header>
 
-      {/* 主区域：三栏布局 */}
+      {/* ============ 主区域：侧栏 + 对话区 ============ */}
       <main className="relative flex min-h-0 flex-1 gap-3 sm:gap-4">
-        {/* 左侧：分类侧栏 + 命令列表
-            桌面端（md+）：根据 showPanel 挤压显示
-            移动端（<md）：showPanel 为 true 时全屏浮层覆盖 */}
-        <AnimatePresence mode="wait">
-          {showPanel && (
-            <motion.aside
-              initial={{ opacity: 0, x: -16 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -16 }}
-              transition={{ duration: 0.25 }}
-              className={cn(
-                "shrink-0",
-                // 桌面端：挤压显示
-                "hidden md:block",
-                // 移动端：浮层覆盖
-                "max-md:!block max-md:absolute max-md:inset-0 max-md:z-30 max-md:w-full"
-              )}
-            >
-              <GlassCard className="glass-shine flex h-full w-72 flex-col p-3 xl:w-80 max-md:w-full max-md:rounded-none">
-                {/* 顶部：移动端关闭按钮 + 搜索框 */}
-                <div className="flex shrink-0 items-center gap-2">
-                  <div className="relative min-w-0 flex-1">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-argent-500" />
-                    <input
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      placeholder="搜索命令…"
-                      className="w-full rounded-lg glass-tile glass-tile-edge py-2 pl-8 pr-7 text-xs text-white placeholder:text-argent-500 focus:outline-none focus:ring-1 focus:ring-titanium-500/40"
-                    />
-                    {search && (
-                      <button
-                        onClick={() => setSearch("")}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-argent-500 hover:text-white"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    )}
-                  </div>
-                  {/* 移动端关闭按钮 */}
-                  <button
-                    onClick={() => setShowPanel(false)}
-                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg glass-tile text-argent-300 hover:text-white md:hidden"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
+        <ConversationSidebar
+          open={sidebarOpen}
+          onToggle={() => setSidebarOpen((v) => !v)}
+          currentConversationId={currentConversationId}
+          onSelectConversation={handleSelectConversation}
+          onNewConversation={handleNewConversation}
+          onDeleteConversation={handleDeleteConversation}
+          refreshTrigger={refreshTrigger}
+        />
 
-                {/* 分类标签列表（搜索时隐藏） */}
-                {!search && (
-                  <div className="mt-3 shrink-0 border-b border-white/10 pb-3">
-                    <div className="mb-2 text-[10px] uppercase tracking-wider text-argent-500">
-                      功能分类
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {commandCategories.map((cat) => {
-                        const Icon = iconMap[cat.icon] ?? Info;
-                        const active = activeCategory === cat.id;
-                        const count = aiCommands.filter((c) => c.category === cat.id).length;
-                        return (
-                          <button
-                            key={cat.id}
-                            onClick={() => setActiveCategory(cat.id)}
-                            className={cn(
-                              "flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition-colors",
-                              active
-                                ? "glass-tile-strong glass-tile-edge text-white"
-                                : "glass-tile text-argent-300 hover:text-white"
-                            )}
-                          >
-                            <Icon className="h-3 w-3 shrink-0" />
-                            <span className="truncate">{cat.name}</span>
-                            <span className={cn("ml-auto text-[9px]", active ? "text-titanium-400" : "text-argent-600")}>
-                              {count}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* 当前分类的命令列表 */}
-                <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-[10px] uppercase tracking-wider text-argent-500">
-                      {search ? `搜索结果（${currentCommands.length}）` : `${activeCatInfo?.name ?? ""} 命令`}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {currentCommands.map((cmd) => {
-                      const Icon = iconMap[cmd.icon] ?? Info;
-                      return (
-                        <button
-                          key={cmd.id}
-                          onClick={() => {
-                            handleQuickCommand(cmd);
-                            // 移动端执行后关闭面板
-                            if (window.matchMedia("(max-width: 767px)").matches) {
-                              setShowPanel(false);
-                            }
-                          }}
-                          onMouseMove={(e) => {
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            e.currentTarget.style.setProperty("--mx", `${e.clientX - rect.left}px`);
-                            e.currentTarget.style.setProperty("--my", `${e.clientY - rect.top}px`);
-                          }}
-                          className={cn(
-                            "group relative flex flex-col items-start gap-1 overflow-hidden rounded-xl p-2 text-left transition-colors",
-                            cmd.danger
-                              ? "glass-tile text-crimson-400 hover:text-crimson-300"
-                              : "glass-tile glass-tile-hover text-argent-100 hover:text-white"
-                          )}
-                          title={cmd.description}
-                        >
-                          <div className="flex items-center gap-1">
-                            <Icon className={cn("h-3.5 w-3.5", cmd.danger && "text-crimson-400")} />
-                            {cmd.danger && <span className="text-[9px] text-crimson-500">⚠</span>}
-                          </div>
-                          <span className="text-[11px] font-medium leading-tight">{cmd.title}</span>
-                          <span className="line-clamp-1 text-[9px] text-argent-500">{cmd.description}</span>
-                        </button>
-                      );
-                    })}
-                    {currentCommands.length === 0 && (
-                      <div className="col-span-2 py-6 text-center text-[11px] text-argent-500">
-                        未找到匹配命令
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </GlassCard>
-            </motion.aside>
-          )}
-        </AnimatePresence>
-
-        {/* 右侧：聊天区 */}
         <GlassCard className="glass-shine flex min-w-0 flex-1 flex-col p-0">
+          {/* 离线模式提示条 */}
+          {!isOnline && (
+            <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2 text-xs text-argent-300">
+              <WifiOff className="h-3.5 w-3.5 text-argent-400" />
+              <span>离线模式 · 本地命令解析（未配置 API）</span>
+            </div>
+          )}
+
           {/* 消息流 */}
-          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+          <div
+            ref={scrollRef}
+            className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6"
+          >
             <div className="mx-auto flex max-w-3xl flex-col gap-4">
               {messages.map((msg) => (
                 <MessageBubble key={msg.id} message={msg} />
               ))}
-              {loading && (
-                <motion.div
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="flex items-start gap-3"
-                >
-                  <Avatar role="ai" />
-                  <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm glass-tile glass-tile-edge px-4 py-3">
-                    <Loader2 className="h-4 w-4 animate-spin text-titanium-500" />
-                    <span className="text-xs text-argent-400">思考中…</span>
-                  </div>
-                </motion.div>
-              )}
             </div>
           </div>
 
           {/* 输入区 */}
           <div className="shrink-0 border-t border-white/10 p-3 sm:p-4">
-            <div className="mx-auto flex max-w-3xl items-end gap-2">
-              <div className="relative flex min-w-0 flex-1 items-end">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  rows={1}
-                  placeholder="输入命令或问题，如「关机」「ping baidu.com」「计算 1+2*3」…"
-                  className="max-h-32 min-h-[44px] w-full resize-none rounded-2xl glass-tile glass-tile-edge px-4 py-3 text-sm text-white placeholder:text-argent-500 focus:outline-none focus:ring-1 focus:ring-titanium-500/40"
-                />
-              </div>
-              <LiquidButton
-                variant="primary"
-                shimmer
-                size="md"
-                onClick={() => handleSend()}
-                disabled={!input.trim() || loading}
-                className="shrink-0"
-              >
-                <Send className="h-4 w-4" />
-                <span className="hidden sm:inline">发送</span>
-              </LiquidButton>
-            </div>
-            <div className="mx-auto mt-2 flex max-w-3xl flex-wrap items-center gap-1.5">
-              <span className="text-[10px] text-argent-500">快捷：</span>
-              {["帮助", "当前时间", "生成 UUID", "随机颜色", "计算 1+2*3", "ping baidu.com"].map((kw) => (
-                <button
-                  key={kw}
-                  onClick={() => handleSend(kw)}
-                  className="rounded-full glass-tile glass-tile-edge px-2.5 py-0.5 text-[10px] text-argent-300 transition-colors hover:text-white"
+            <div className="mx-auto flex max-w-3xl flex-col gap-2">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                rows={1}
+                placeholder={
+                  isOnline
+                    ? "告诉 AI 你想做什么..."
+                    : "输入命令，如「关机」「计算 1+2」「当前时间」..."
+                }
+                className="max-h-32 min-h-[44px] w-full resize-none rounded-2xl glass-tile glass-tile-edge px-4 py-3 text-sm text-white placeholder:text-argent-500 focus:outline-none focus:ring-1 focus:ring-titanium-500/40"
+              />
+              <div className="flex items-center justify-between gap-2">
+                {/* 左：快捷指令 */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] text-argent-500">快捷：</span>
+                  {QUICK_COMMANDS.map((kw) => (
+                    <button
+                      key={kw}
+                      onClick={() => handleSend(kw)}
+                      disabled={loading}
+                      className="rounded-full glass-tile glass-tile-edge px-2.5 py-0.5 text-[10px] text-argent-300 transition-colors hover:text-white disabled:opacity-50"
+                    >
+                      {kw}
+                    </button>
+                  ))}
+                </div>
+                {/* 右：发送按钮 */}
+                <LiquidButton
+                  variant="primary"
+                  shimmer
+                  size="md"
+                  onClick={() => handleSend()}
+                  disabled={!input.trim() || loading}
+                  className="shrink-0"
                 >
-                  {kw}
-                </button>
-              ))}
+                  {loading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Send className="h-4 w-4" />
+                  )}
+                  <span className="hidden sm:inline">
+                    {loading ? "执行中" : "发送"}
+                  </span>
+                </LiquidButton>
+              </div>
             </div>
           </div>
         </GlassCard>
@@ -410,10 +555,37 @@ export default function CommandAI() {
   );
 }
 
-// ---------- 消息气泡 ----------
+// ============================================================
+// 子组件
+// ============================================================
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+// 在线/离线状态指示器
+function OnlineIndicator({ online }: { online: boolean }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span
+        className={cn(
+          "h-1.5 w-1.5 rounded-full",
+          online ? "bg-emerald-400" : "bg-argent-500"
+        )}
+      />
+      <span
+        className={cn(
+          "text-[10px]",
+          online ? "text-emerald-400" : "text-argent-500"
+        )}
+      >
+        {online ? "在线" : "离线"}
+      </span>
+    </span>
+  );
+}
+
+// 消息气泡：根据消息类型渲染（用户文本 / AI 文本 / AI 任务步骤）
+function MessageBubble({ message }: { message: UIMessage }) {
   const isUser = message.role === "user";
+  const hasSteps = !!(message.steps && message.steps.length > 0);
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
@@ -422,42 +594,58 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       className={cn("flex items-start gap-3", isUser && "flex-row-reverse")}
     >
       <Avatar role={message.role} />
-      <div
-        className={cn(
-          "relative max-w-[85%] whitespace-pre-wrap break-words rounded-2xl px-4 py-3 text-sm leading-relaxed",
-          isUser
-            ? "rounded-tr-sm bg-gradient-to-br from-titanium-500/30 to-titanium-700/20 text-white glass-tile-edge"
-            : cn(
-                "rounded-tl-sm glass-tile glass-tile-edge",
-                message.status === "success" && "text-argent-100",
-                message.status === "error" && "text-crimson-300",
-                message.status === "warning" && "text-argent-200",
-                message.status === "info" && "text-argent-100"
-              )
+      <div className="flex min-w-0 max-w-[85%] flex-col gap-2">
+        {/* AI 在线模式：步骤可视化（thinking/tool_call/final/error） */}
+        {hasSteps && (
+          <TaskProgress
+            steps={message.steps!}
+            maxSteps={MAX_STEPS}
+            isRunning={!!message.isRunning}
+          />
         )}
-      >
-        {/* 状态图标 */}
-        {!isUser && message.status && message.status !== "info" && (
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <StatusIcon status={message.status} />
-            {message.executed && (
-              <span className="rounded-full glass-tile-strong px-1.5 py-0.5 text-[9px] text-titanium-400">
-                已执行
-              </span>
+
+        {/* 文本气泡：用户消息 / 离线模式 AI 回复 */}
+        {message.text && !hasSteps && (
+          <div
+            className={cn(
+              "relative whitespace-pre-wrap break-words rounded-2xl px-4 py-3 text-sm leading-relaxed",
+              isUser
+                ? "rounded-tr-sm bg-gradient-to-br from-titanium-500/30 to-titanium-700/20 text-white glass-tile-edge"
+                : cn(
+                    "rounded-tl-sm glass-tile glass-tile-edge",
+                    message.status === "error" && "text-crimson-300",
+                    message.status === "success" && "text-argent-100",
+                    message.status === "warning" && "text-argent-200",
+                    (!message.status || message.status === "info") && "text-argent-100"
+                  )
             )}
+          >
+            {/* 离线模式状态图标 */}
+            {!isUser && message.status && message.status !== "info" && (
+              <div className="mb-1.5 flex items-center gap-1.5">
+                <StatusIcon status={message.status} />
+                {message.executed && (
+                  <span className="rounded-full glass-tile-strong px-1.5 py-0.5 text-[9px] text-titanium-400">
+                    已执行
+                  </span>
+                )}
+              </div>
+            )}
+            {message.text}
+            <span className="mt-1.5 block text-right text-[9px] text-argent-500">
+              {new Date(message.timestamp).toLocaleTimeString("zh-CN", {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
           </div>
         )}
-        {message.text}
-        <span className="mt-1.5 block text-right text-[9px] text-argent-500">
-          {new Date(message.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}
-        </span>
       </div>
     </motion.div>
   );
 }
 
-// ---------- 头像 ----------
-
+// 头像
 function Avatar({ role }: { role: "user" | "ai" }) {
   if (role === "user") {
     return (
@@ -473,12 +661,14 @@ function Avatar({ role }: { role: "user" | "ai" }) {
   );
 }
 
-// ---------- 状态图标 ----------
-
+// 状态图标（离线模式用）
 function StatusIcon({ status }: { status: AIResponse["status"] }) {
   const cls = "h-3.5 w-3.5";
-  if (status === "success") return <CheckCircle2 className={cn(cls, "text-titanium-400")} />;
-  if (status === "error") return <AlertTriangle className={cn(cls, "text-crimson-400")} />;
-  if (status === "warning") return <AlertTriangle className={cn(cls, "text-argent-300")} />;
+  if (status === "success")
+    return <CheckCircle2 className={cn(cls, "text-titanium-400")} />;
+  if (status === "error")
+    return <AlertTriangle className={cn(cls, "text-crimson-400")} />;
+  if (status === "warning")
+    return <AlertTriangle className={cn(cls, "text-argent-300")} />;
   return null;
 }
