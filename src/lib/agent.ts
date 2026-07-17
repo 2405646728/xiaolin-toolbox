@@ -101,23 +101,29 @@ export const SYSTEM_PROMPT = `你是小林 AI，一个能自主操控电脑的�
 重复以上循环直到任务完成。
 
 ## 关键规则
-1. **截屏先行**：操作 GUI 前先调用 screenshot 看清屏幕，再决定点击哪里
-2. **坐标精准**：根据截图判断 UI 元素的精确像素坐标，再调用 mouse_click
-3. **小步前进**：每步只做一件事，观察结果后再决定下一步
-4. **错误重试**：如果点击没生效，重新截屏观察，调整坐标重试
-5. **用户拒绝**：如果用户拒绝了某个危险操作，不要重复请求，告知用户并询问替代方案
-6. **任务完成**：任务完成后用简洁的中文总结结果，不再调用工具
+1. **每轮只调用一个工具**：不要一次返回多个 tool_calls。调用一个工具后，等观察结果再决定下一步。这是强制要求。
+2. **截屏先行**：操作 GUI 前先调用 screenshot 看清屏幕，再决定点击哪里
+3. **坐标精准**：根据截图判断 UI 元素的精确像素坐标，再调用 mouse_click
+4. **小步前进**：每步只做一件事，观察结果后再决定下一步
+5. **错误重试**：如果点击没生效，重新截屏观察，调整坐标重试
+6. **用户拒绝**：如果用户拒绝了某个危险操作，不要重复请求，告知用户并询问替代方案
+7. **任务完成**：任务完成后用简洁的中文总结结果，不再调用工具
 
 ## 网页操作场景（重要）
-当用户要求「在某个网站里做某事」时（如「在B站搜索XX」「在淘宝搜索YY」「在知乎回答问题」），必须模拟人类操作流程，**不要**用 search_web 工具（它只会用搜索引擎新开搜索页）。正确流程：
+**指令识别**：以下表达都表示「在网站内搜索」，不要用 search_web 工具：
+- 「打开B站搜索XX」=「在B站网站内搜索XX」
+- 「去淘宝搜索XX」=「在淘宝网站内搜索XX」
+- 「在知乎搜索XX」=「在知乎网站内搜索XX」
+
+正确流程（每步只调用一个工具，观察结果后再进行下一步）：
 1. **open_url** 打开目标网站（如 https://www.bilibili.com）
-2. **screenshot** 截屏看清页面布局
+2. **screenshot** 截屏看清页面布局和搜索框位置
 3. **mouse_click** 点击网站内的搜索框（根据截图判断坐标）
 4. **keyboard_type** 输入搜索关键词
 5. **keyboard_press** 按 Enter 提交搜索
 6. **screenshot** 截屏查看搜索结果
 
-如果用户要求「打开浏览器搜索XX」（没有指定网站），才使用 search_web 工具。
+**只有**当用户说「打开浏览器搜索XX」（没有指定具体网站）时，才使用 search_web 工具。
 
 ## 安全边界
 - 不会执行 format/del/rd/rmdir 等破坏性命令
@@ -307,12 +313,43 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       });
 
       // ---- 依次执行每个 tool_call ----
+      // 强制单步执行：若一轮返回多个 tool_calls，只执行第一个，其余推迟
+      // 这样 AI 必须观察上一步结果后再决定下一步，避免盲目批量操作
       let aborted = false;
-      for (const tc of response.tool_calls) {
+      const toolCallList = response.tool_calls || [];
+      for (let tcIdx = 0; tcIdx < toolCallList.length; tcIdx++) {
+        const tc = toolCallList[tcIdx];
         // 中断检查（工具执行前）
         if (signal?.aborted) {
           aborted = true;
           break;
+        }
+
+        // 第 2 个及之后的 tool_call 不执行，返回推迟提示（保持 OpenAI 协议合规）
+        if (tcIdx > 0) {
+          const toolCallId = tc?.id || generateToolCallId();
+          const toolName = tc?.function?.name || "unknown";
+          const toolCallInfo = { id: toolCallId, name: toolName, args: {} };
+          const deferredResult = {
+            success: false,
+            error: "已推迟执行。请先观察上一个工具的结果（尤其是截图），再决定下一步操作。每轮只执行一个工具。",
+          };
+          const deferredStep: AgentStep = {
+            index: step,
+            type: "tool_result",
+            toolCall: toolCallInfo,
+            toolResult: deferredResult,
+            timestamp: Date.now(),
+          };
+          steps.push(deferredStep);
+          safeCall(callbacks.onToolResult, deferredResult, toolName);
+          safeCall(callbacks.onStep, deferredStep);
+          workingMessages.push({
+            role: "tool",
+            content: JSON.stringify(deferredResult),
+            tool_call_id: toolCallId,
+          });
+          continue;
         }
 
         const toolName: string = tc?.function?.name || "unknown";
