@@ -114,27 +114,10 @@ body {
     pointer-events: none;
   }
 
-  /* 悬停光斑跟随（鼠标驱动的透镜聚焦） */
+  /* 悬停容器（保留类名用于布局，鼠标跟随光斑已移除） */
   .glass-hover {
     position: relative;
     overflow: hidden;
-  }
-  .glass-hover::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: radial-gradient(
-      240px circle at var(--mx, 50%) var(--my, 50%),
-      rgba(255, 110, 64, 0.16),
-      transparent 60%
-    );
-    opacity: 0;
-    transition: opacity 0.3s ease;
-    pointer-events: none;
-    z-index: 1;
-  }
-  .glass-hover:hover::before {
-    opacity: 1;
   }
 
   /* 状态栏流光带 */
@@ -241,27 +224,10 @@ body {
     pointer-events: none;
   }
 
-  /* 小元素悬停光斑跟随（更聚焦的透镜） */
+  /* 小元素悬停容器（保留类名用于布局，鼠标跟随光斑已移除） */
   .glass-tile-hover {
     position: relative;
     overflow: hidden;
-  }
-  .glass-tile-hover::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: radial-gradient(
-      120px circle at var(--mx, 50%) var(--my, 50%),
-      rgba(255, 110, 64, 0.22),
-      transparent 60%
-    );
-    opacity: 0;
-    transition: opacity 0.25s ease;
-    pointer-events: none;
-    z-index: 1;
-  }
-  .glass-tile-hover:hover::before {
-    opacity: 1;
   }
 
   /* 进度条玻璃轨道（容器） */

@@ -86,6 +86,33 @@ function saveSecurity(s: SecurityConfig): void {
   try { localStorage.setItem(SECURITY_KEY, JSON.stringify(s)); } catch { /* 静默 */ }
 }
 
+// 预置模型对应的 API Key 缓存（每个预置独立保存，切换时自动恢复）
+const PRESET_APIKEY_STORAGE = "xiaolin-ai-preset-apikeys";
+
+function loadPresetApiKeys(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(PRESET_APIKEY_STORAGE);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function savePresetApiKey(presetKey: string, apiKey: string): void {
+  try {
+    const map = loadPresetApiKeys();
+    map[presetKey] = apiKey;
+    localStorage.setItem(PRESET_APIKEY_STORAGE, JSON.stringify(map));
+  } catch { /* 静默 */ }
+}
+
+// 根据当前配置反查所属预置 key（baseUrl + model 匹配）
+function detectPresetKey(config: LLMConfig): string | null {
+  for (const p of PRESET_MODELS) {
+    if (p.key === "custom") continue;
+    if (p.baseUrl === config.baseUrl && p.model === config.model) return p.key;
+  }
+  return null;
+}
+
 // 玻璃开关
 function GlassToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -213,6 +240,9 @@ export default function Settings({ onBack, onConfigChange }: SettingsProps) {
   const handleSave = () => {
     setSaving(true);
     saveLLMConfig(config);
+    // 同步缓存当前 apiKey 到所属预置，便于切换后切回时恢复
+    const pk = detectPresetKey(config);
+    if (pk && config.apiKey) savePresetApiKey(pk, config.apiKey);
     window.setTimeout(() => { setSaving(false); onConfigChange?.(); }, 300);
   };
 
@@ -253,13 +283,20 @@ export default function Settings({ onBack, onConfigChange }: SettingsProps) {
 
   // 应用预置模型（不立即保存，仅填充表单）
   const applyPreset = (preset: Preset) => {
+    // 切换前：缓存当前预置的 apiKey，便于之后切回时自动恢复
+    const currentKey = detectPresetKey(config);
+    if (currentKey && config.apiKey) savePresetApiKey(currentKey, config.apiKey);
+
+    // 切换后：从缓存读取目标预置的 apiKey；Ollama 永远用占位符
+    const cached = loadPresetApiKeys();
     setConfig((c) => ({
       ...c,
       baseUrl: preset.baseUrl,
       model: preset.model,
       visionModel: preset.visionModel,
-      // Ollama 不校验 API Key，自动填充占位符方便用户直接使用
-      apiKey: preset.key === "ollama" ? (c.apiKey || "ollama") : c.apiKey,
+      apiKey: preset.key === "ollama"
+        ? "ollama"
+        : (cached[preset.key] ?? ""),
     }));
   };
 
