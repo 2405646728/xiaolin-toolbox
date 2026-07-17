@@ -1132,11 +1132,85 @@ fn send_notification(title: String, body: String) -> Result<(), String> {
     }
 }
 
+// ============================ 网络与无线控制 ============================
+
+/// 查询 WiFi 启用状态
+#[tauri::command]
+fn wifi_status() -> Result<bool, String> {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            "netsh interface show interface name='Wi-Fi'"
+        ])
+        .output()
+        .map_err(|e| format!("执行失败: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    // 解析 "Administrative state: Enabled" 或中文 "已启用"
+    let enabled = stdout.to_lowercase().contains("enabled")
+        || stdout.to_lowercase().contains("已启用")
+        || stdout.to_lowercase().contains("已打开");
+    Ok(enabled)
+}
+
+/// 启用/禁用 WiFi（需要管理员权限）
+#[tauri::command]
+fn wifi_toggle(enable: bool) -> Result<(), String> {
+    let action = if enable { "enable" } else { "disable" };
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            &format!("netsh interface set interface 'Wi-Fi' admin={}", action)
+        ])
+        .output()
+        .map_err(|e| format!("执行失败: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("WiFi 切换失败（可能需要管理员权限）: {} {}", stdout, stderr));
+    }
+    Ok(())
+}
+
+/// 查询蓝牙启用状态
+#[tauri::command]
+fn bluetooth_status() -> Result<bool, String> {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            "Get-PnpDevice -Class Bluetooth | Where-Object {$_.FriendlyName -like '*Radio*' -or $_.FriendlyName -like '*蓝牙*'} | Select-Object -First 1 -ExpandProperty Status"
+        ])
+        .output()
+        .map_err(|e| format!("执行失败: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+    Ok(stdout == "ok" || stdout.contains("ok"))
+}
+
+/// 启用/禁用蓝牙（需要管理员权限）
+#[tauri::command]
+fn bluetooth_toggle(enable: bool) -> Result<(), String> {
+    let cmd = if enable {
+        "Enable-PnpDevice -Class Bluetooth -Confirm:$false -ErrorAction SilentlyContinue"
+    } else {
+        "Disable-PnpDevice -Class Bluetooth -Confirm:$false -ErrorAction SilentlyContinue"
+    };
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", cmd])
+        .output()
+        .map_err(|e| format!("执行失败: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("蓝牙切换失败（可能需要管理员权限）: {}", stderr));
+    }
+    Ok(())
+}
+
 // ============================ 应用入口 ============================
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             // 系统信息
             get_system_info,
@@ -1188,7 +1262,12 @@ pub fn run() {
             power_sleep,
             power_restart,
             power_shutdown,
-            send_notification
+            send_notification,
+            // 网络与无线控制
+            wifi_status,
+            wifi_toggle,
+            bluetooth_status,
+            bluetooth_toggle
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

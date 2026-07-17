@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft, Eye, EyeOff, Save, Plug, Shield, BarChart3, Info,
-  Check, X, Loader2, Trash2, Download,
+  Check, X, Loader2, Trash2, Download, RefreshCw, CheckCircle2,
 } from "lucide-react";
 import { GlassButton } from "@/components/glass/GlassButton";
 import { UsagePanel } from "@/components/UsagePanel";
@@ -43,6 +43,8 @@ const COMMAND_BLOCKLIST = ["format", "del", "rd", "rmdir", "mkfs", "dd"];
 
 // 预置模型卡片
 const PRESET_MODELS = [
+  { key: "ollama", name: "Ollama 本地", desc: "Qwen2.5 7B + LLaVA（4060 8GB 推荐）",
+    baseUrl: "http://localhost:11434/v1", model: "qwen2.5:7b-instruct-q4_K_M", visionModel: "llava:7b" },
   { key: "openai", name: "OpenAI", desc: "GPT-4o 系列",
     baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", visionModel: "gpt-4o" },
   { key: "deepseek", name: "DeepSeek", desc: "DeepSeek Chat",
@@ -153,6 +155,8 @@ export default function Settings({ onBack, onConfigChange }: SettingsProps) {
       baseUrl: preset.baseUrl,
       model: preset.model,
       visionModel: preset.visionModel,
+      // Ollama 不校验 API Key，自动填充占位符方便用户直接使用
+      apiKey: preset.key === "ollama" ? (c.apiKey || "ollama") : c.apiKey,
     }));
   };
 
@@ -566,6 +570,55 @@ function UsageTab({
 
 function AboutTab() {
   const techStack = ["Tauri 2.0", "React 18", "Rust", "TypeScript"];
+  const [checking, setChecking] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{ available: boolean; version?: string; message: string } | null>(null);
+
+  // 检查更新：通过 Tauri updater 插件查询最新版本
+  const handleCheckUpdate = async () => {
+    setChecking(true);
+    setUpdateInfo(null);
+    try {
+      // 动态加载 Tauri 插件（浏览器环境会失败并降级提示）
+      const updaterModule = "@tauri-apps/plugin-updater";
+      const processModule = "@tauri-apps/plugin-process";
+      let updater: any;
+      let processApi: any;
+      try {
+        updater = await import(/* @vite-ignore */ updaterModule);
+        processApi = await import(/* @vite-ignore */ processModule);
+      } catch {
+        // 浏览器环境或插件未安装
+        setUpdateInfo({
+          available: false,
+          message: "更新功能仅在桌面应用中可用（需安装版小林 AI）",
+        });
+        return;
+      }
+      const update = await updater.check();
+      if (update?.available) {
+        setUpdateInfo({
+          available: true,
+          version: update.version,
+          message: `发现新版本 v${update.version}，正在下载...`,
+        });
+        // 下载并安装
+        await update.downloadAndInstall();
+        // 安装完成后重启应用
+        await processApi.relaunch();
+      } else {
+        setUpdateInfo({
+          available: false,
+          message: "当前已是最新版本 v1.1.0",
+        });
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "检查更新失败";
+      setUpdateInfo({ available: false, message: msg });
+    } finally {
+      setChecking(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <div className="glass glass-edge rounded-2xl p-6 shadow-xl">
@@ -577,7 +630,7 @@ function AboutTab() {
             <h2 className="text-lg font-semibold text-white">小林 AI</h2>
             <div className="mt-0.5 flex items-center gap-2">
               <span className="rounded-full bg-titanium-500/15 border border-titanium-500/30 px-2 py-0.5 text-[11px] text-titanium-300">
-                v1.0.0
+                v1.1.0
               </span>
               <span className="text-xs text-argent-400">桌面 AI 助手</span>
             </div>
@@ -586,6 +639,24 @@ function AboutTab() {
         <p className="mt-4 text-sm leading-relaxed text-argent-100">
           基于 Tauri 2.0 构建的对话型 AI 助手，能通过工具调用自主操控电脑完成任务。
         </p>
+        {/* 检查更新 */}
+        <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-white/10 pt-4">
+          <GlassButton variant="primary" onClick={handleCheckUpdate} disabled={checking}>
+            {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            <span>{checking ? "检查中..." : "检查更新"}</span>
+          </GlassButton>
+          {updateInfo && (
+            <div className={cn(
+              "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs",
+              updateInfo.available
+                ? "bg-titanium-500/15 border border-titanium-500/30 text-titanium-200"
+                : "bg-base-900/40 border border-white/10 text-argent-200"
+            )}>
+              {updateInfo.available ? <CheckCircle2 size={12} /> : <Info size={12} />}
+              <span>{updateInfo.message}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="glass glass-edge rounded-2xl p-5 shadow-xl">

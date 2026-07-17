@@ -104,6 +104,10 @@ export const TOOL_LABELS: Record<string, string> = {
   power_restart: "重启电脑",
   power_shutdown: "关闭电脑",
   run_shell: "执行 Shell 命令",
+  wifi_status: "查询 WiFi 状态",
+  wifi_toggle: "切换 WiFi",
+  bluetooth_status: "查询蓝牙状态",
+  bluetooth_toggle: "切换蓝牙",
 };
 
 // ============================================================
@@ -716,6 +720,52 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+
+  // -------- 网络与无线控制 --------
+  {
+    type: "function",
+    function: {
+      name: "wifi_status",
+      description: "查询 WiFi 适配器是否启用。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wifi_toggle",
+      description: "启用或禁用 WiFi 适配器。需要管理员权限。",
+      parameters: {
+        type: "object",
+        properties: {
+          enable: { type: "boolean", description: "true=启用 WiFi，false=禁用" },
+        },
+        required: ["enable"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "bluetooth_status",
+      description: "查询蓝牙无线电是否启用。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "bluetooth_toggle",
+      description: "启用或禁用蓝牙无线电。需要管理员权限。",
+      parameters: {
+        type: "object",
+        properties: {
+          enable: { type: "boolean", description: "true=启用蓝牙，false=禁用" },
+        },
+        required: ["enable"],
+      },
+    },
+  },
 ];
 
 // ============================================================
@@ -778,6 +828,10 @@ export async function executeTool(
 
   // 3. 调用对应 Tauri command
   // 参数名按 Rust 命令签名传递（snake_case），Tauri 自动处理 camelCase ↔ snake_case
+  // 网络与无线控制：wifi_status/bluetooth_status 无参数，移除可能误传的 enable
+  if (name === "wifi_status" || name === "bluetooth_status") {
+    delete args.enable;
+  }
   try {
     const result = await invoke(name, args as Record<string, unknown>);
     return { success: true, data: result };

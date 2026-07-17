@@ -17,6 +17,10 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/Cargo.lock
 
+# Updater 私钥（绝对不能提交，泄露后他人可伪造更新）
+src-tauri/updater-key
+src-tauri/updater-key.pub
+
 # Build artifacts
 *.msi
 *.exe

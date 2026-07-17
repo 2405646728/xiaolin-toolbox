@@ -131,8 +131,8 @@
 | 5.4 | 多对话会话管理 | ✅ | 100% | conversations.ts 新建/切换/删除 |
 | 5.5 | 对话历史侧栏 | ✅ | 100% | ConversationSidebar.tsx 替换原命令分类 |
 | 5.6 | 命令历史记录 | ✅ | 100% | TaskProgress 展示工具调用历史 |
-| 5.7 | 快捷指令面板 | ⏸️ | 0% | 暂未实现，离线模式可用命令速查 |
-| 5.8 | 定时任务（本地） | ⏸️ | 0% | 暂未实现 |
+| 5.7 | 快捷指令面板 | ✅ | 100% | QuickActions.tsx 4 分组 14 条预设指令，闪电图标触发 |
+| 5.8 | 定时任务（本地） | ✅ | 100% | scheduler.ts + SchedulerPanel.tsx，30 秒检查，localStorage 持久化 |
 
 ### Phase 6 · 系统控制扩展
 
@@ -140,7 +140,7 @@
 |---|------|------|------|------|
 | 6.1 | 音量控制 | ✅ | 100% | set_volume / mute_volume / unmute_volume |
 | 6.2 | 电源管理 | ✅ | 100% | sleep/restart/shutdown（前端二次确认） |
-| 6.3 | WiFi/蓝牙开关 | ⏸️ | 0% | 暂未实现 |
+| 6.3 | WiFi/蓝牙开关 | ✅ | 100% | wifi_status/wifi_toggle/bluetooth_status/bluetooth_toggle（netsh + Get-PnpDevice，切换需管理员权限） |
 | 6.4 | 系统通知发送 | ✅ | 100% | send_notification |
 | 6.5 | 截屏保存到文件 | ✅ | 100% | save_screenshot |
 | 6.6 | 录屏（短期） | ⏸️ | 0% | 暂未实现 |

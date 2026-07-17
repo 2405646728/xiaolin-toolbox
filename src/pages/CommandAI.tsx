@@ -9,6 +9,7 @@ import {
   Send, Sparkles, User, Settings as SettingsIcon,
   AlertTriangle, CheckCircle2, Loader2,
   PanelLeftClose, PanelLeftOpen, Square, WifiOff, Eraser,
+  Zap, Clock,
 } from "lucide-react";
 import { GlassCard } from "@/components/glass/GlassCard";
 import { LiquidButton } from "@/components/liquid/LiquidButton";
@@ -16,7 +17,10 @@ import { GlassButton } from "@/components/glass/GlassButton";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { TaskProgress } from "@/components/TaskProgress";
 import { UsageBadge } from "@/components/UsageBadge";
+import QuickActions from "@/components/QuickActions";
+import SchedulerPanel from "@/components/SchedulerPanel";
 import { cn } from "@/lib/utils";
+import { startScheduler } from "@/lib/scheduler";
 import { runAgent, SYSTEM_PROMPT, type AgentStep } from "@/lib/agent";
 import {
   loadLLMConfig,
@@ -96,6 +100,9 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
   const [currentConversationId, setCurrentConvId] = useState<string | null>(null);
   const [llmConfig, setLlmConfig] = useState<LLMConfig | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  // 浮动面板开关：快捷指令 / 定时任务
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [schedOpen, setSchedOpen] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -208,6 +215,19 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
     },
     [input, loading, currentConversationId, reloadConfig]
   );
+
+  // handleSend 的 ref 镜像：供 scheduler 回调读取最新实现，避免闭包陷阱
+  // （scheduler 仅在挂载时启动一次，但回调里需调用最新的 handleSend）
+  const handleSendRef = useRef(handleSend);
+  handleSendRef.current = handleSend;
+
+  // 启动本地定时任务调度器：到期任务把 command 作为用户输入发送给 AI
+  useEffect(() => {
+    const stopScheduler = startScheduler((task) => {
+      handleSendRef.current(task.command);
+    });
+    return stopScheduler;
+  }, []);
 
   // 在线模式：ReAct Agent 流程
   const runAgentFlow = useCallback(
@@ -448,6 +468,26 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
           >
             <Eraser className="h-4 w-4" />
           </GlassButton>
+          {/* 快捷指令面板触发按钮 */}
+          <GlassButton
+            variant="ghost"
+            size="sm"
+            onClick={() => setQuickOpen(true)}
+            className="shrink-0 px-2.5"
+            title="快捷指令"
+          >
+            <Zap className="h-4 w-4" />
+          </GlassButton>
+          {/* 定时任务面板触发按钮 */}
+          <GlassButton
+            variant="ghost"
+            size="sm"
+            onClick={() => setSchedOpen(true)}
+            className="shrink-0 px-2.5"
+            title="定时任务"
+          >
+            <Clock className="h-4 w-4" />
+          </GlassButton>
           <GlassButton
             variant="ghost"
             size="sm"
@@ -551,6 +591,25 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
           </div>
         </GlassCard>
       </main>
+
+      {/* ============ 浮动面板：快捷指令 / 定时任务 ============ */}
+      <QuickActions
+        open={quickOpen}
+        onClose={() => setQuickOpen(false)}
+        onAction={(cmd) => {
+          setQuickOpen(false);
+          // 复用现有 handleSend 逻辑，把指令作为用户输入发送
+          handleSend(cmd);
+        }}
+      />
+      <SchedulerPanel
+        open={schedOpen}
+        onClose={() => setSchedOpen(false)}
+        onTrigger={(cmd) => {
+          // 任务触发时把指令作为用户输入发送（同 handleSend）
+          handleSend(cmd);
+        }}
+      />
     </div>
   );
 }
