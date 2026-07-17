@@ -14,6 +14,26 @@ import { loadLLMConfig, saveLLMConfig, chatCompletion, fetchModels, type LLMConf
 import { exportUsageCsv, resetUsage, MODEL_PRICING } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
+// 检测是否运行在 Tauri 桌面环境
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+// 懒加载 Tauri 自动更新插件模块（缓存 Promise 避免重复加载）
+let updaterModulePromise: Promise<typeof import("@tauri-apps/plugin-updater")> | null = null;
+let processModulePromise: Promise<typeof import("@tauri-apps/plugin-process")> | null = null;
+
+function loadUpdaterModule() {
+  if (!updaterModulePromise) {
+    updaterModulePromise = import("@tauri-apps/plugin-updater");
+  }
+  return updaterModulePromise;
+}
+function loadProcessModule() {
+  if (!processModulePromise) {
+    processModulePromise = import("@tauri-apps/plugin-process");
+  }
+  return processModulePromise;
+}
+
 export interface SettingsProps {
   onBack?: () => void;          // 返回主界面回调
   onConfigChange?: () => void;  // 配置变更通知（让主界面刷新 LLMConfig）
@@ -747,25 +767,19 @@ function AboutTab() {
 
   // 检查更新：通过 Tauri updater 插件查询最新版本
   const handleCheckUpdate = async () => {
+    // 浏览器环境直接提示（不进入 try 避免误导）
+    if (!isTauri) {
+      setUpdateInfo({
+        available: false,
+        message: "更新功能仅在桌面应用中可用（需安装版小林 AI）",
+      });
+      return;
+    }
     setChecking(true);
     setUpdateInfo(null);
     try {
-      // 动态加载 Tauri 插件（浏览器环境会失败并降级提示）
-      const updaterModule = "@tauri-apps/plugin-updater";
-      const processModule = "@tauri-apps/plugin-process";
-      let updater: any;
-      let processApi: any;
-      try {
-        updater = await import(/* @vite-ignore */ updaterModule);
-        processApi = await import(/* @vite-ignore */ processModule);
-      } catch {
-        // 浏览器环境或插件未安装
-        setUpdateInfo({
-          available: false,
-          message: "更新功能仅在桌面应用中可用（需安装版小林 AI）",
-        });
-        return;
-      }
+      const updater = await loadUpdaterModule();
+      const processApi = await loadProcessModule();
       const update = await updater.check();
       if (update?.available) {
         setUpdateInfo({
@@ -780,7 +794,7 @@ function AboutTab() {
       } else {
         setUpdateInfo({
           available: false,
-          message: "当前已是最新版本 v1.1.0",
+          message: "当前已是最新版本 v1.1.1",
         });
       }
     } catch (e) {
@@ -802,7 +816,7 @@ function AboutTab() {
             <h2 className="text-lg font-semibold text-white">小林 AI</h2>
             <div className="mt-0.5 flex items-center gap-2">
               <span className="rounded-full bg-titanium-500/15 border border-titanium-500/30 px-2 py-0.5 text-[11px] text-titanium-300">
-                v1.1.0
+                v1.1.1
               </span>
               <span className="text-xs text-argent-400">桌面 AI 助手</span>
             </div>
