@@ -568,3 +568,33 @@ export async function visionChat(options: VisionChatOptions): Promise<VisionChat
 
   return { content, usage };
 }
+
+// ---------- fetchModels 拉取模型列表 ----------
+
+/**
+ * 拉取 API 支持的模型列表
+ * 调用 OpenAI 兼容协议的 GET /models 端点
+ * 返回模型 id 数组（按字母排序）
+ */
+export async function fetchModels(config: LLMConfig): Promise<string[]> {
+  const url = `${config.baseUrl.replace(/\/+$/, "")}/models`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+  });
+
+  if (!response.ok) {
+    if (response.status === 401) throw new AuthError();
+    if (response.status === 403) throw new AuthError("无访问权限，请检查 API Key 权限");
+    throw new NetworkError(`获取模型列表失败: HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+  // OpenAI 兼容格式: { data: [{ id: "gpt-4o" }, ...] }
+  const models: string[] = Array.isArray(data?.data)
+    ? data.data.map((m: any) => m.id).filter(Boolean)
+    : [];
+  return models.sort();
+}

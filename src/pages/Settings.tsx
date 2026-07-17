@@ -2,15 +2,15 @@
 // 五个分区：API 配置 / 模型选择 / 安全策略 / 用量统计 / 关于
 // iOS 26 液态玻璃风格 + Framer Motion Tab 切换动画
 
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft, Eye, EyeOff, Save, Plug, Shield, BarChart3, Info,
-  Check, X, Loader2, Trash2, Download, RefreshCw, CheckCircle2,
+  Check, X, Loader2, Trash2, Download, RefreshCw, CheckCircle2, ChevronDown,
 } from "lucide-react";
 import { GlassButton } from "@/components/glass/GlassButton";
 import { UsagePanel } from "@/components/UsagePanel";
-import { loadLLMConfig, saveLLMConfig, chatCompletion, type LLMConfig } from "@/lib/llm";
+import { loadLLMConfig, saveLLMConfig, chatCompletion, fetchModels, type LLMConfig } from "@/lib/llm";
 import { exportUsageCsv, resetUsage, MODEL_PRICING } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
@@ -104,6 +104,88 @@ function GlassToggle({ checked, onChange }: { checked: boolean; onChange: (v: bo
   );
 }
 
+// 模型选择 combobox：可手动输入 + 从下拉列表选择
+function ModelCombobox({
+  value, onChange, placeholder, models,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  models: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // 过滤匹配的模型（大小写不敏感包含匹配）
+  const filtered = useMemo(() => {
+    if (!filter) return models.slice(0, 50); // 无过滤时最多显示 50 条
+    const f = filter.toLowerCase();
+    return models.filter((m) => m.toLowerCase().includes(f)).slice(0, 50);
+  }, [models, filter]);
+
+  return (
+    <div className="relative">
+      <input
+        ref={inputRef}
+        className={cn(inputCls, "pr-9")}
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setFilter(e.target.value);
+        }}
+        onFocus={() => { setFilter(value); setOpen(true); }}
+        onBlur={() => { setTimeout(() => setOpen(false), 150); }}
+        placeholder={placeholder}
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        onClick={() => {
+          setFilter(value);
+          setOpen(!open);
+          inputRef.current?.focus();
+        }}
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-argent-300 hover:text-white transition-colors"
+      >
+        <ChevronDown size={16} className={cn("transition-transform", open && "rotate-180")} />
+      </button>
+      <AnimatePresence>
+        {open && filtered.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.15 }}
+            className="glass-strong glass-edge absolute z-50 mt-1 max-h-60 w-full overflow-y-auto rounded-xl border border-white/10 p-1 shadow-2xl"
+          >
+            {filtered.map((m) => (
+              <button
+                key={m}
+                type="button"
+                onMouseDown={(e) => { e.preventDefault(); }}
+                onClick={() => {
+                  onChange(m);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "block w-full truncate rounded-lg px-3 py-1.5 text-left text-xs transition-colors",
+                  m === value
+                    ? "bg-titanium-500/20 text-titanium-200"
+                    : "text-argent-100 hover:bg-white/5 hover:text-white"
+                )}
+                title={m}
+              >
+                {m}
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 // ---------- 主组件 ----------
 
 export default function Settings({ onBack, onConfigChange }: SettingsProps) {
@@ -118,6 +200,9 @@ export default function Settings({ onBack, onConfigChange }: SettingsProps) {
   const [resetDone, setResetDone] = useState(false);
   const [exportDone, setExportDone] = useState(false);
   const [usageTrigger, setUsageTrigger] = useState(0);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchModelsError, setFetchModelsError] = useState<string | null>(null);
 
   // 字段更新辅助
   const update = <K extends keyof LLMConfig>(key: K, value: LLMConfig[K]) => {
@@ -145,6 +230,24 @@ export default function Settings({ onBack, onConfigChange }: SettingsProps) {
       setTestResult({ success: false, message: msg });
     } finally {
       setTesting(false);
+    }
+  };
+
+  // 拉取 API 支持的模型列表（GET /models）
+  const handleFetchModels = async () => {
+    setFetchingModels(true);
+    setFetchModelsError(null);
+    try {
+      if (!config.baseUrl) throw new Error("未配置 Base URL");
+      const models = await fetchModels(config);
+      setAvailableModels(models);
+      if (models.length === 0) setFetchModelsError("API 返回空列表");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "拉取失败";
+      setFetchModelsError(msg);
+      setAvailableModels([]);
+    } finally {
+      setFetchingModels(false);
     }
   };
 
@@ -257,7 +360,11 @@ export default function Settings({ onBack, onConfigChange }: SettingsProps) {
             {activeTab === "api" && (
               <ApiTab config={config} update={update} showKey={showKey} setShowKey={setShowKey}
                 saving={saving} testing={testing} testResult={testResult}
-                onSave={handleSave} onTest={handleTest} />
+                onSave={handleSave} onTest={handleTest}
+                availableModels={availableModels}
+                fetchingModels={fetchingModels}
+                fetchModelsError={fetchModelsError}
+                onFetchModels={handleFetchModels} />
             )}
             {activeTab === "model" && <ModelTab config={config} onApply={applyPreset} />}
             {activeTab === "security" && (
@@ -282,6 +389,7 @@ export default function Settings({ onBack, onConfigChange }: SettingsProps) {
 function ApiTab({
   config, update, showKey, setShowKey,
   saving, testing, testResult, onSave, onTest,
+  availableModels, fetchingModels, fetchModelsError, onFetchModels,
 }: {
   config: LLMConfig;
   update: <K extends keyof LLMConfig>(key: K, value: LLMConfig[K]) => void;
@@ -289,16 +397,35 @@ function ApiTab({
   saving: boolean; testing: boolean;
   testResult: { success: boolean; message: string } | null;
   onSave: () => void; onTest: () => void;
+  availableModels: string[];
+  fetchingModels: boolean;
+  fetchModelsError: string | null;
+  onFetchModels: () => void;
 }) {
   return (
     <div className="glass glass-edge rounded-2xl p-6 shadow-xl">
       <h2 className="mb-4 text-sm font-medium text-white">API 配置</h2>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div className="flex flex-col gap-1.5">
-          <label className={labelCls}>Base URL</label>
+          <div className="flex items-center justify-between">
+            <label className={labelCls}>Base URL</label>
+            <button type="button" onClick={onFetchModels} disabled={fetchingModels}
+              className="flex items-center gap-1 rounded-full border border-titanium-500/30 bg-titanium-500/10 px-2.5 py-1 text-[11px] text-titanium-200 transition-colors hover:bg-titanium-500/20 disabled:opacity-50">
+              {fetchingModels ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+              <span>{fetchingModels ? "拉取中..." : "拉取模型列表"}</span>
+            </button>
+          </div>
           <input className={inputCls} value={config.baseUrl}
             onChange={(e) => update("baseUrl", e.target.value)}
             placeholder="https://api.openai.com/v1" />
+          {fetchModelsError && (
+            <span className="text-[11px] text-crimson-400">{fetchModelsError}</span>
+          )}
+          {availableModels.length > 0 && (
+            <span className="text-[11px] text-argent-400">
+              已拉取 {availableModels.length} 个模型，点击下方模型输入框下拉选择
+            </span>
+          )}
         </div>
         <div className="flex flex-col gap-1.5">
           <label className={labelCls}>API Key</label>
@@ -314,13 +441,21 @@ function ApiTab({
         </div>
         <div className="flex flex-col gap-1.5">
           <label className={labelCls}>文本模型</label>
-          <input className={inputCls} value={config.model}
-            onChange={(e) => update("model", e.target.value)} placeholder="gpt-4o-mini" />
+          <ModelCombobox
+            value={config.model}
+            onChange={(v) => update("model", v)}
+            placeholder="gpt-4o-mini"
+            models={availableModels}
+          />
         </div>
         <div className="flex flex-col gap-1.5">
           <label className={labelCls}>视觉模型</label>
-          <input className={inputCls} value={config.visionModel}
-            onChange={(e) => update("visionModel", e.target.value)} placeholder="gpt-4o" />
+          <ModelCombobox
+            value={config.visionModel}
+            onChange={(v) => update("visionModel", v)}
+            placeholder="gpt-4o"
+            models={availableModels}
+          />
         </div>
         <div className="flex flex-col gap-1.5 md:col-span-2">
           <div className="flex items-center justify-between">
