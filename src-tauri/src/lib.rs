@@ -171,6 +171,31 @@ fn get_system_info() -> SystemInfoPayload {
 
 // ============================ 现有命令：硬件信息 ============================
 
+/// 执行 PowerShell 命令并返回 stdout（去除首尾空白）
+/// 用于 WMI 查询 GPU / 主板 / 电池等 sysinfo crate 未提供的信息
+#[cfg(target_os = "windows")]
+fn run_powershell(script: &str) -> Option<String> {
+    use std::process::Command;
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 /// 采集详细硬件信息（一次性，无需高频）
 #[tauri::command]
 fn get_hardware_info() -> HardwarePayload {
@@ -225,16 +250,56 @@ fn get_hardware_info() -> HardwarePayload {
         })
         .collect();
 
-    let gpu_name = "未知（需扩展 crate）".into();
-    let gpu_vendor = "未知".into();
-    let mb_manufacturer = "未知".into();
-    let mb_product = "未知".into();
-    let battery = BatteryInfo {
+    let mut gpu_name: String = "未知".into();
+    let mut gpu_vendor: String = "未知".into();
+    let mut mb_manufacturer: String = "未知".into();
+    let mut mb_product: String = "未知".into();
+    let mut battery = BatteryInfo {
         vendor: "未知".into(),
         model: "未知".into(),
         cycles: 0,
         health: 0,
     };
+
+    // Windows 平台：通过 PowerShell + WMI 查询 GPU / 主板 / 电池信息
+    #[cfg(target_os = "windows")]
+    {
+        // GPU 信息：Win32_VideoController
+        if let Some(out) = run_powershell("Get-CimInstance Win32_VideoController | Select-Object -First 1 -Property Name,AdapterCompatibility | ConvertTo-Json -Compress") {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&out) {
+                if let Some(name) = parsed.get("Name").and_then(|v| v.as_str()) {
+                    gpu_name = name.to_string();
+                }
+                if let Some(vendor) = parsed.get("AdapterCompatibility").and_then(|v| v.as_str()) {
+                    gpu_vendor = vendor.to_string();
+                }
+            }
+        }
+
+        // 主板信息：Win32_BaseBoard
+        if let Some(out) = run_powershell("Get-CimInstance Win32_BaseBoard | Select-Object -Property Manufacturer,Product | ConvertTo-Json -Compress") {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&out) {
+                if let Some(m) = parsed.get("Manufacturer").and_then(|v| v.as_str()) {
+                    mb_manufacturer = m.to_string();
+                }
+                if let Some(p) = parsed.get("Product").and_then(|v| v.as_str()) {
+                    mb_product = p.to_string();
+                }
+            }
+        }
+
+        // 电池信息：Win32_Battery（笔记本才有）
+        if let Some(out) = run_powershell("Get-CimInstance Win32_Battery | Select-Object -Property Name,EstimatedChargeRemaining | ConvertTo-Json -Compress") {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&out) {
+                if let Some(name) = parsed.get("Name").and_then(|v| v.as_str()) {
+                    battery.model = name.to_string();
+                }
+                if let Some(charge) = parsed.get("EstimatedChargeRemaining").and_then(|v| v.as_u64()) {
+                    battery.health = charge as u32;
+                }
+            }
+        }
+    }
 
     HardwarePayload {
         hostname, platform, os_version, arch, cpu_brand, cpu_cores, cpu_logical_cores,

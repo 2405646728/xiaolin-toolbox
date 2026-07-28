@@ -388,7 +388,7 @@ export function TaskProgress({
         {/* 横向进度条 */}
         <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-base-900/60">
           <motion.div
-            className="h-full rounded-full bg-gradient-to-r from-titanium-500 to-titanium-400 shadow-[0_0_8px_rgba(255,110,64,0.5)]"
+            className="h-full rounded-full bg-gradient-to-r from-titanium-500 to-titanium-400 shadow-[0_0_8px_rgba(59,110,245,0.5)]"
             initial={{ width: 0 }}
             animate={{ width: `${progress * 100}%` }}
             transition={{ type: "spring", stiffness: 200, damping: 26 }}

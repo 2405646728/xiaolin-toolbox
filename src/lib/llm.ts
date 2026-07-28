@@ -16,10 +16,15 @@ export interface LLMConfig {
   maxTokens: number; // 最大 tokens
 }
 
-/** 对话消息 */
+/** 多模态内容片段（OpenAI 兼容格式） */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } }; // url 为 data:image/png;base64,xxx
+
+/** 对话消息：content 既支持纯文本也支持多模态数组 */
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | ContentPart[];
   tool_calls?: any[];
   tool_call_id?: string;
 }
@@ -31,6 +36,7 @@ export interface StreamChatOptions {
   tools?: any[]; // OpenAI Function Calling 工具定义
   onDelta?: (delta: string) => void; // 流式回调
   signal?: AbortSignal; // 中断信号
+  conversationId?: string; // 关联对话 ID，用于用量统计
 }
 
 /** 对话返回结果 */
@@ -55,6 +61,7 @@ export interface VisionChatOptions {
     >;
   }>;
   signal?: AbortSignal;
+  conversationId?: string; // 关联对话 ID，用于用量统计
 }
 
 /** 视觉对话返回结果 */
@@ -147,7 +154,16 @@ function estimateTokens(text: string): number {
 function estimatePromptTokens(messages: ChatMessage[]): number {
   const totalText = messages
     .map((m) => {
-      let s = m.content || "";
+      // content 可能是 string 或 ContentPart[]（多模态）
+      let s = "";
+      if (typeof m.content === "string") {
+        s = m.content;
+      } else if (Array.isArray(m.content)) {
+        for (const part of m.content) {
+          if (part.type === "text") s += part.text;
+          else if (part.type === "image_url") s += part.image_url.url;
+        }
+      }
       if (m.tool_calls) s += JSON.stringify(m.tool_calls);
       return s;
     })
@@ -188,6 +204,7 @@ function safeRecordUsage(record: {
   completionTokens: number;
   totalTokens: number;
   imageTokens?: number;
+  conversationId?: string;
 }): void {
   try {
     recordUsage({
@@ -199,7 +216,7 @@ function safeRecordUsage(record: {
       totalTokens: record.totalTokens,
       imageTokens: record.imageTokens,
       cost: 0, // 费用由 usage 模块根据 MODEL_PRICING 计算，这里传 0 由其覆盖
-      conversationId: undefined,
+      conversationId: record.conversationId,
     });
   } catch {
     // 用量记录失败不影响主流程
@@ -214,7 +231,7 @@ function safeRecordUsage(record: {
  * 每个 `data: {...}` 行提取 delta.content 调用 onDelta，累积 content 与 tool_calls
  */
 export async function streamChat(options: StreamChatOptions): Promise<ChatResult> {
-  const { config, messages, tools, onDelta, signal } = options;
+  const { config, messages, tools, onDelta, signal, conversationId } = options;
 
   const url = `${config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const body: Record<string, unknown> = {
@@ -351,6 +368,7 @@ export async function streamChat(options: StreamChatOptions): Promise<ChatResult
         promptTokens: finalUsage.prompt_tokens,
         completionTokens: finalUsage.completion_tokens,
         totalTokens: finalUsage.total_tokens,
+        conversationId,
       });
       throw err;
     }
@@ -375,6 +393,7 @@ export async function streamChat(options: StreamChatOptions): Promise<ChatResult
     promptTokens: usage.prompt_tokens,
     completionTokens: usage.completion_tokens,
     totalTokens: usage.total_tokens,
+    conversationId,
   });
 
   const result: ChatResult = {
@@ -394,7 +413,7 @@ export async function streamChat(options: StreamChatOptions): Promise<ChatResult
 export async function chatCompletion(
   options: Omit<StreamChatOptions, "onDelta">,
 ): Promise<ChatResult> {
-  const { config, messages, tools, signal } = options;
+  const { config, messages, tools, signal, conversationId } = options;
 
   const url = `${config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const body: Record<string, unknown> = {
@@ -466,6 +485,7 @@ export async function chatCompletion(
     promptTokens: usage.prompt_tokens,
     completionTokens: usage.completion_tokens,
     totalTokens: usage.total_tokens,
+    conversationId,
   });
 
   const result: ChatResult = { content, usage };
@@ -477,7 +497,7 @@ export async function chatCompletion(
 
 /** 视觉多模态对话，使用 config.visionModel，不流式 */
 export async function visionChat(options: VisionChatOptions): Promise<VisionChatResult> {
-  const { config, messages, signal } = options;
+  const { config, messages, signal, conversationId } = options;
 
   const url = `${config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const body: Record<string, unknown> = {
@@ -564,6 +584,7 @@ export async function visionChat(options: VisionChatOptions): Promise<VisionChat
     completionTokens: usage.completion_tokens,
     totalTokens: usage.total_tokens,
     imageTokens: imageTokens,
+    conversationId,
   });
 
   return { content, usage };

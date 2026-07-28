@@ -198,9 +198,9 @@ function Drip({ drip }: { drip: Drip }) {
         position: "absolute",
         borderRadius: "50%",
         background:
-          "radial-gradient(circle at 35% 30%, rgba(255,255,255,0.7), rgba(255,110,64,0.45) 50%, transparent 72%)",
+          "radial-gradient(circle at 35% 30%, rgba(255,255,255,0.7), rgba(59,110,245,0.45) 50%, transparent 72%)",
         boxShadow:
-          "0 0 14px rgba(255,110,64,0.55), inset 0 2px 4px rgba(255,255,255,0.5)",
+          "0 0 14px rgba(59,110,245,0.55), inset 0 2px 4px rgba(255,255,255,0.5)",
         filter: "url(#liquid-soft)",
         pointerEvents: "none",
         zIndex: 5,

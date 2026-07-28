@@ -13,6 +13,7 @@ import {
   TOOL_DEFINITIONS,
   type ToolExecutionResult,
 } from "./tools";
+import { loadSecurity, shouldConfirmTool, checkShellCommand } from "./security";
 
 // ============================================================
 // 1. 类型定义
@@ -254,6 +255,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
           messages: workingMessages,
           tools: TOOL_DEFINITIONS,
           signal,
+          conversationId,
         });
       } catch (err: any) {
         // 中断单独处理
@@ -373,7 +375,37 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         // ---- 执行工具 ----
         let result: ToolExecutionResult;
         try {
-          result = await executeTool(toolName, toolArgs, { conversationId });
+          // run_shell 黑名单检查（在确认前拦截，避免危险命令弹出确认框）
+          if (toolName === "run_shell" && typeof toolArgs.command === "string") {
+            const blocked = checkShellCommand(toolArgs.command);
+            if (blocked) {
+              result = { success: false, error: blocked };
+              // 跳过执行，直接进入结果处理
+              const toolResultStep: AgentStep = {
+                index: step,
+                type: "tool_result",
+                toolCall: toolCallInfo,
+                toolResult: result,
+                timestamp: Date.now(),
+              };
+              steps.push(toolResultStep);
+              safeCall(callbacks.onToolResult, result, toolName);
+              safeCall(callbacks.onStep, toolResultStep);
+              workingMessages.push({
+                role: "tool",
+                content: `执行失败：${blocked}`,
+                tool_call_id: toolCallId,
+              });
+              continue;
+            }
+          }
+
+          // 读取安全策略，按配置决定是否确认
+          const securityConfig = loadSecurity();
+          result = await executeTool(toolName, toolArgs, {
+            conversationId,
+            requiresConfirmation: (name) => shouldConfirmTool(name, securityConfig),
+          });
         } catch (e: any) {
           result = {
             success: false,
@@ -432,7 +464,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
                   },
                 },
               ],
-            } as any);
+            });
           } else if (config.visionModel) {
             // 配置了独立的视觉模型：用 visionChat 分析截图，把文字描述返回给文本模型
             let screenshotDescription = "";
@@ -457,6 +489,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
                   },
                 ],
                 signal,
+                conversationId,
               });
               screenshotDescription = visionResult.content;
             } catch {

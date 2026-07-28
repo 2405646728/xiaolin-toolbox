@@ -9,7 +9,7 @@ import {
   Send, Sparkles, User, Settings as SettingsIcon,
   AlertTriangle, CheckCircle2, Loader2,
   PanelLeftClose, PanelLeftOpen, Square, WifiOff, Eraser,
-  Zap, Clock,
+  Zap, Clock, ImagePlus, X,
 } from "lucide-react";
 import { GlassCard } from "@/components/glass/GlassCard";
 import { LiquidButton } from "@/components/liquid/LiquidButton";
@@ -38,6 +38,7 @@ import {
   matchCommand, executeCommand, chatReply,
   type AIResponse,
 } from "@/lib/aiCommands";
+import { loadUserAvatar, fileToDataUrl } from "@/lib/userAvatar";
 
 // ---------- 类型与常量 ----------
 
@@ -46,6 +47,11 @@ export interface CommandAIProps {
 }
 
 // UI 消息模型：支持用户文本 / AI 文本 / AI 任务步骤
+interface ImageAttachment {
+  url: string;        // data URL（data:image/png;base64,xxx）
+  name?: string;      // 原始文件名
+}
+
 interface UIMessage {
   id: string;
   role: "user" | "ai";
@@ -55,6 +61,7 @@ interface UIMessage {
   status?: AIResponse["status"]; // 离线模式命令状态
   executed?: boolean;            // 离线模式是否真实执行
   timestamp: number;
+  attachments?: ImageAttachment[]; // 用户发送的图片附件
 }
 
 const QUICK_COMMANDS = ["截屏看看", "打开记事本", "搜索周杰伦", "当前时间", "获取系统状态"];
@@ -71,10 +78,21 @@ function makeWelcome(): UIMessage {
 
 // ConversationMessage → UIMessage 转换（用于加载历史对话）
 function convMsgToUIMsg(m: ConversationMessage): UIMessage {
+  // content 可能是 string 或 ContentPart[]（多模态），提取文本部分
+  let text: string | undefined;
+  if (typeof m.content === "string") {
+    text = m.content || undefined;
+  } else if (Array.isArray(m.content)) {
+    text = m.content
+      .filter((p) => p.type === "text")
+      .map((p) => (p as { type: "text"; text: string }).text)
+      .join("\n") || undefined;
+  }
   return {
     id: m.id,
     role: m.role === "user" ? "user" : "ai",
-    text: m.content || undefined,
+    text,
+    attachments: (m as any).attachments,
     status: m.role === "assistant" ? "info" : undefined,
     timestamp: m.timestamp,
   };
@@ -103,12 +121,71 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
   // 浮动面板开关：快捷指令 / 定时任务
   const [quickOpen, setQuickOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
+  // 待发送的图片附件
+  const [pendingAttachments, setPendingAttachments] = useState<ImageAttachment[]>([]);
+  // 用户自定义头像
+  const [userAvatar, setUserAvatar] = useState<string | null>(() => loadUserAvatar());
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   // 消息列表的 ref 镜像，供回调中读取最新值（避免闭包陷阱）
   const messagesRef = useRef<UIMessage[]>([]);
   messagesRef.current = messages;
+  // 文件选择 input（隐藏，由按钮触发）
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 添加图片文件到待发送附件
+  const addImageFiles = useCallback(async (files: FileList | File[]) => {
+    const imageFiles = Array.from(files).filter((f) =>
+      f.type.startsWith("image/")
+    );
+    if (imageFiles.length === 0) return;
+    try {
+      const dataUrls = await Promise.all(
+        imageFiles.map((f) => fileToDataUrl(f).then((url) => ({ url, name: f.name })))
+      );
+      setPendingAttachments((prev) => [...prev, ...dataUrls]);
+    } catch {
+      // 静默失败
+    }
+  }, []);
+
+  // 粘贴事件处理：提取剪贴板中的图片
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imageFiles: File[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        addImageFiles(imageFiles);
+      }
+    },
+    [addImageFiles]
+  );
+
+  // 拖拽事件处理
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0) {
+        addImageFiles(files);
+      }
+    },
+    [addImageFiles]
+  );
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
 
   const isOnline = llmConfig !== null;
 
@@ -127,6 +204,13 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
 
     const uiMsgs = conv.messages.map(convMsgToUIMsg);
     setMessages(uiMsgs.length > 0 ? uiMsgs : [makeWelcome()]);
+  }, []);
+
+  // 监听用户头像变更事件（设置页上传/清除头像时触发）
+  useEffect(() => {
+    const handler = () => setUserAvatar(loadUserAvatar());
+    window.addEventListener("user-avatar-changed", handler);
+    return () => window.removeEventListener("user-avatar-changed", handler);
   }, []);
 
   // 自动滚动到底部
@@ -164,16 +248,20 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
   const handleSend = useCallback(
     async (text?: string) => {
       const content = (text ?? input).trim();
-      if (!content || loading) return;
+      const attachments = text ? [] : pendingAttachments;
+      // 文本或附件至少有一个才发送
+      if ((!content && attachments.length === 0) || loading) return;
 
       setInput("");
+      setPendingAttachments([]);
       setLoading(true);
 
       const now = Date.now();
       const userMsg: UIMessage = {
         id: genId(),
         role: "user",
-        text: content,
+        text: content || undefined,
+        attachments: attachments.length > 0 ? attachments : undefined,
         timestamp: now,
       };
       const aiMsgId = genId();
@@ -194,26 +282,27 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
           role: "user",
           content,
           timestamp: now,
-        });
+          attachments: attachments.length > 0 ? attachments : undefined,
+        } as any);
         // 首条消息自动生成对话标题
         const conv = getConversation(convId);
         if (conv && conv.messages.length <= 1) {
-          const title = await generateConversationTitle(content);
+          const title = await generateConversationTitle(content || "图片消息");
           updateConversation(convId, { title });
         }
       }
 
       const cfg = reloadConfig();
       if (cfg) {
-        await runAgentFlow(cfg, aiMsgId, content, convId);
+        await runAgentFlow(cfg, aiMsgId, content, convId, attachments);
       } else {
-        await offlineFlow(aiMsgId, content, convId);
+        await offlineFlow(aiMsgId, content || "（图片消息）", convId);
       }
 
       setLoading(false);
       setRefreshTrigger((v) => v + 1);
     },
-    [input, loading, currentConversationId, reloadConfig]
+    [input, loading, currentConversationId, reloadConfig, pendingAttachments]
   );
 
   // handleSend 的 ref 镜像：供 scheduler 回调读取最新实现，避免闭包陷阱
@@ -231,7 +320,13 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
 
   // 在线模式：ReAct Agent 流程
   const runAgentFlow = useCallback(
-    async (cfg: LLMConfig, aiMsgId: string, userText: string, convId: string | null) => {
+    async (
+      cfg: LLMConfig,
+      aiMsgId: string,
+      userText: string,
+      convId: string | null,
+      attachments: ImageAttachment[] = []
+    ) => {
       const controller = new AbortController();
       abortRef.current = controller;
 
@@ -248,7 +343,22 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
           content: m.text || "",
         });
       }
-      historyMessages.push({ role: "user", content: userText });
+
+      // 当前用户消息：若有图片附件，构造多模态 content
+      if (attachments.length > 0) {
+        const parts: LLMChatMessage["content"] = [];
+        if (userText) {
+          parts.push({ type: "text", text: userText });
+        } else {
+          parts.push({ type: "text", text: "请分析这张图片。" });
+        }
+        for (const att of attachments) {
+          parts.push({ type: "image_url", image_url: { url: att.url } });
+        }
+        historyMessages.push({ role: "user", content: parts });
+      } else {
+        historyMessages.push({ role: "user", content: userText });
+      }
 
       try {
         await runAgent({
@@ -426,8 +536,13 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
 
         {/* 中：应用名 + 模型名 + 在线状态 */}
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl glass-tile-strong glass-tile-edge glass-shine text-titanium-500">
-            <Sparkles className="relative z-10 h-4 w-4" />
+          <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-xl glass-tile-edge glass-shine">
+            <img
+              src="/ai-avatar.png"
+              alt="小林 AI"
+              className="h-full w-full object-cover"
+              draggable={false}
+            />
           </div>
           <div className="flex min-w-0 flex-col">
             <h1 className="truncate text-sm font-semibold text-white">小林 AI</h1>
@@ -528,7 +643,7 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
           >
             <div className="mx-auto flex max-w-3xl flex-col gap-4">
               {messages.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} />
+                <MessageBubble key={msg.id} message={msg} userAvatar={userAvatar} />
               ))}
             </div>
           </div>
@@ -536,23 +651,73 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
           {/* 输入区 */}
           <div className="shrink-0 border-t border-white/10 p-3 sm:p-4">
             <div className="mx-auto flex max-w-3xl flex-col gap-2">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
+              {/* 待发送图片附件预览 */}
+              {pendingAttachments.length > 0 && (
+                <div className="flex flex-wrap gap-2 rounded-2xl glass-tile p-2">
+                  {pendingAttachments.map((att, i) => (
+                    <div key={i} className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-lg glass-tile-edge">
+                      <img
+                        src={att.url}
+                        alt={att.name || "附件"}
+                        className="h-full w-full object-cover"
+                      />
+                      <button
+                        onClick={() =>
+                          setPendingAttachments((prev) =>
+                            prev.filter((_, idx) => idx !== i)
+                          )
+                        }
+                        className="absolute right-0 top-0 flex h-5 w-5 items-center justify-center rounded-bl-lg rounded-tr-lg bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                        title="移除"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-end gap-2">
+                {/* 图片上传按钮 */}
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={loading}
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl glass-tile glass-tile-edge text-argent-300 transition-colors hover:text-white disabled:opacity-50"
+                  title="上传图片"
+                >
+                  <ImagePlus className="h-4 w-4" />
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files) addImageFiles(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  onPaste={handlePaste}
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  rows={1}
+                  placeholder={
+                    isOnline
+                      ? "告诉 AI 你想做什么...（可粘贴/拖拽图片）"
+                      : "输入命令，如「关机」「计算 1+2」「当前时间」..."
                   }
-                }}
-                rows={1}
-                placeholder={
-                  isOnline
-                    ? "告诉 AI 你想做什么..."
-                    : "输入命令，如「关机」「计算 1+2」「当前时间」..."
-                }
-                className="max-h-32 min-h-[44px] w-full resize-none rounded-2xl glass-tile glass-tile-edge px-4 py-3 text-sm text-white placeholder:text-argent-500 focus:outline-none focus:ring-1 focus:ring-titanium-500/40"
-              />
+                  className="max-h-32 min-h-[44px] w-full resize-none rounded-2xl glass-tile glass-tile-edge px-4 py-3 text-sm text-white placeholder:text-argent-500 focus:outline-none focus:ring-1 focus:ring-titanium-500/40"
+                />
+              </div>
               <div className="flex items-center justify-between gap-2">
                 {/* 左：快捷指令 */}
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -574,7 +739,7 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
                   shimmer
                   size="md"
                   onClick={() => handleSend()}
-                  disabled={!input.trim() || loading}
+                  disabled={(!input.trim() && pendingAttachments.length === 0) || loading}
                   className="shrink-0"
                 >
                   {loading ? (
@@ -641,9 +806,10 @@ function OnlineIndicator({ online }: { online: boolean }) {
 }
 
 // 消息气泡：根据消息类型渲染（用户文本 / AI 文本 / AI 任务步骤）
-function MessageBubble({ message }: { message: UIMessage }) {
+function MessageBubble({ message, userAvatar }: { message: UIMessage; userAvatar?: string | null }) {
   const isUser = message.role === "user";
   const hasSteps = !!(message.steps && message.steps.length > 0);
+  const hasAttachments = !!(message.attachments && message.attachments.length > 0);
 
   return (
     <motion.div
@@ -652,7 +818,7 @@ function MessageBubble({ message }: { message: UIMessage }) {
       transition={{ duration: 0.3 }}
       className={cn("flex items-start gap-3", isUser && "flex-row-reverse")}
     >
-      <Avatar role={message.role} />
+      <Avatar role={message.role} userAvatar={userAvatar} />
       <div className="flex min-w-0 max-w-[85%] flex-col gap-2">
         {/* AI 在线模式：步骤可视化（thinking/tool_call/final/error） */}
         {hasSteps && (
@@ -660,6 +826,25 @@ function MessageBubble({ message }: { message: UIMessage }) {
             steps={message.steps!}
             isRunning={!!message.isRunning}
           />
+        )}
+
+        {/* 用户图片附件 */}
+        {hasAttachments && (
+          <div className={cn("flex flex-wrap gap-2", isUser && "justify-end")}>
+            {message.attachments!.map((att, i) => (
+              <div
+                key={i}
+                className="overflow-hidden rounded-xl glass-tile-edge max-h-40 max-w-[200px]"
+              >
+                <img
+                  src={att.url}
+                  alt={att.name || "图片"}
+                  className="max-h-40 max-w-[200px] object-contain"
+                  draggable={false}
+                />
+              </div>
+            ))}
+          </div>
         )}
 
         {/* 文本气泡：用户消息 / 离线模式 AI 回复 */}
@@ -704,17 +889,36 @@ function MessageBubble({ message }: { message: UIMessage }) {
 }
 
 // 头像
-function Avatar({ role }: { role: "user" | "ai" }) {
+function Avatar({ role, userAvatar }: { role: "user" | "ai"; userAvatar?: string | null }) {
   if (role === "user") {
+    // 用户头像：自定义 > 默认 User 图标
+    if (userAvatar) {
+      return (
+        <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-xl glass-tile-edge glass-shine">
+          <img
+            src={userAvatar}
+            alt="用户"
+            className="h-full w-full object-cover"
+            draggable={false}
+          />
+        </div>
+      );
+    }
     return (
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl glass-tile glass-tile-edge text-argent-300">
         <User className="h-4 w-4" />
       </div>
     );
   }
+  // AI 头像：使用上传的「小林ai聊天头像.png」
   return (
-    <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl glass-tile-strong glass-tile-edge glass-shine text-titanium-500">
-      <Sparkles className="relative z-10 h-4 w-4" />
+    <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-xl glass-tile-edge glass-shine">
+      <img
+        src="/ai-avatar.png"
+        alt="小林 AI"
+        className="h-full w-full object-cover"
+        draggable={false}
+      />
     </div>
   );
 }

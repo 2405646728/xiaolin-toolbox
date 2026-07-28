@@ -7,11 +7,18 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft, Eye, EyeOff, Save, Plug, Shield, BarChart3, Info,
   Check, X, Loader2, Trash2, Download, RefreshCw, CheckCircle2, ChevronDown,
+  User, ImagePlus,
 } from "lucide-react";
 import { GlassButton } from "@/components/glass/GlassButton";
 import { UsagePanel } from "@/components/UsagePanel";
 import { loadLLMConfig, saveLLMConfig, chatCompletion, fetchModels, type LLMConfig } from "@/lib/llm";
 import { exportUsageCsv, resetUsage, MODEL_PRICING } from "@/lib/usage";
+import { loadUserAvatar, saveUserAvatar, clearUserAvatar, compressImage } from "@/lib/userAvatar";
+import {
+  loadSecurity, saveSecurity, COMMAND_BLOCKLIST, getDangerousToolList,
+  type SecurityConfig,
+} from "@/lib/security";
+import { TOOL_LABELS } from "@/lib/tools";
 import { cn } from "@/lib/utils";
 
 // 检测是否运行在 Tauri 桌面环境
@@ -52,14 +59,8 @@ const DEFAULT_CONFIG: LLMConfig = {
 
 const SECURITY_KEY = "xiaolin-ai-security";
 
-interface SecurityConfig {
-  confirmDangerous: boolean;
-  dailyCostLimit: number;
-}
-const DEFAULT_SECURITY: SecurityConfig = { confirmDangerous: true, dailyCostLimit: 10 };
-
-// 命令黑名单（只读展示）
-const COMMAND_BLOCKLIST = ["format", "del", "rd", "rmdir", "mkfs", "dd"];
+// SecurityConfig 类型与默认值已移至 @/lib/security
+// COMMAND_BLOCKLIST 也从 @/lib/security 导入
 
 // 预置模型卡片
 const PRESET_MODELS = [
@@ -94,17 +95,7 @@ const inputCls =
   "w-full rounded-xl bg-base-900/40 border border-white/10 px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-titanium-500/50 focus:ring-2 focus:ring-titanium-500/20 transition-colors";
 const labelCls = "text-xs text-argent-300 font-medium";
 
-// 安全配置读写
-function loadSecurity(): SecurityConfig {
-  try {
-    const raw = localStorage.getItem(SECURITY_KEY);
-    if (!raw) return DEFAULT_SECURITY;
-    return { ...DEFAULT_SECURITY, ...JSON.parse(raw) };
-  } catch { return DEFAULT_SECURITY; }
-}
-function saveSecurity(s: SecurityConfig): void {
-  try { localStorage.setItem(SECURITY_KEY, JSON.stringify(s)); } catch { /* 静默 */ }
-}
+// 安全配置读写已移至 @/lib/security（loadSecurity / saveSecurity）
 
 // 预置模型对应的 API Key 缓存（每个预置独立保存，切换时自动恢复）
 const PRESET_APIKEY_STORAGE = "xiaolin-ai-preset-apikeys";
@@ -134,11 +125,21 @@ function detectPresetKey(config: LLMConfig): string | null {
 }
 
 // 玻璃开关
-function GlassToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+function GlassToggle({
+  checked, onChange, disabled,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+}) {
   return (
-    <button type="button" onClick={() => onChange(!checked)}
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => { if (!disabled) onChange(!checked); }}
       className={cn(
         "relative h-6 w-11 rounded-full border transition-colors",
+        disabled && "opacity-40 cursor-not-allowed",
         checked
           ? "bg-gradient-to-br from-titanium-500 to-titanium-700 border-titanium-500/50"
           : "bg-base-900/60 border-white/15"
@@ -616,19 +617,73 @@ function SecurityTab({
   resetDone: boolean; exportDone: boolean;
   onResetUsage: () => void; onExportCsv: () => void;
 }) {
+  const dangerousTools = getDangerousToolList();
+
+  // 切换某个工具的确认开关
+  const toggleToolConfirm = (toolName: string, value: boolean) => {
+    setSecurity((s) => ({
+      ...s,
+      toolConfirmOverrides: {
+        ...s.toolConfirmOverrides,
+        [toolName]: value,
+      },
+    }));
+  };
+
+  // 获取工具当前确认状态（考虑全局开关 + 覆盖）
+  const getToolConfirmState = (toolName: string): boolean => {
+    if (!security.confirmDangerous) return false;
+    if (toolName in security.toolConfirmOverrides) {
+      return security.toolConfirmOverrides[toolName];
+    }
+    return true; // 默认危险工具需要确认
+  };
+
   return (
     <div className="flex flex-col gap-4">
-      {/* 危险操作二次确认 */}
+      {/* 危险操作二次确认 - 全局开关 */}
       <div className="glass glass-edge rounded-2xl p-5 shadow-xl">
         <div className="flex items-center justify-between">
           <div className="flex flex-col gap-1">
             <span className="text-sm font-medium text-white">危险操作二次确认</span>
             <span className="text-xs text-argent-300">
-              AI 调用 delete_file / kill_process 等危险工具时弹窗确认
+              全局开关。关闭后所有工具直接执行不确认（不推荐）
             </span>
           </div>
           <GlassToggle checked={security.confirmDangerous}
             onChange={(v) => setSecurity((s) => ({ ...s, confirmDangerous: v }))} />
+        </div>
+      </div>
+
+      {/* 按工具粒度确认开关 */}
+      <div className="glass glass-edge rounded-2xl p-5 shadow-xl">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium text-white">工具确认粒度</span>
+          <span className="text-xs text-argent-400">
+            {security.confirmDangerous ? "可单独关闭某个工具的确认" : "需先开启全局开关"}
+          </span>
+        </div>
+        <p className="mt-1 text-xs text-argent-300">
+          以下危险工具默认执行前弹窗确认。关闭后该工具将直接执行不再确认。
+        </p>
+        <div className="mt-3 flex flex-col gap-2">
+          {dangerousTools.map((toolName) => {
+            const checked = getToolConfirmState(toolName);
+            const label = TOOL_LABELS[toolName] || toolName;
+            return (
+              <div key={toolName} className="flex items-center justify-between rounded-lg bg-white/5 px-3 py-2">
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-sm text-white">{label}</span>
+                  <span className="font-mono text-[10px] text-argent-400">{toolName}</span>
+                </div>
+                <GlassToggle
+                  checked={checked}
+                  onChange={(v) => toggleToolConfirm(toolName, v)}
+                  disabled={!security.confirmDangerous}
+                />
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -654,7 +709,7 @@ function SecurityTab({
       {/* 命令黑名单 */}
       <div className="glass glass-edge rounded-2xl p-5 shadow-xl">
         <span className="text-sm font-medium text-white">命令黑名单（只读）</span>
-        <p className="mt-1 text-xs text-argent-300">以下命令在 run_shell 中将被拒绝执行</p>
+        <p className="mt-1 text-xs text-argent-300">以下命令在 run_shell 中将被拒绝执行，无法关闭</p>
         <div className="mt-3 flex flex-wrap gap-2">
           {COMMAND_BLOCKLIST.map((cmd) => (
             <span key={cmd}
@@ -760,6 +815,99 @@ function UsageTab({
 
 // ---------- Tab 5: 关于 ----------
 
+// 个人头像设置卡片
+function UserAvatarCard() {
+  const [avatar, setAvatar] = useState<string | null>(() => loadUserAvatar());
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handleUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      const file = files[0];
+      const dataUrl = await compressImage(file, 256, 0.85);
+      saveUserAvatar(dataUrl);
+      setAvatar(dataUrl);
+      // 通知其他组件刷新头像
+      window.dispatchEvent(new CustomEvent("user-avatar-changed"));
+    } catch {
+      // 静默失败
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleClear = () => {
+    clearUserAvatar();
+    setAvatar(null);
+    window.dispatchEvent(new CustomEvent("user-avatar-changed"));
+  };
+
+  return (
+    <div className="glass glass-edge rounded-2xl p-5 shadow-xl">
+      <h3 className="text-sm font-medium text-white">个人头像</h3>
+      <div className="mt-3 flex items-center gap-4">
+        {/* 头像预览 */}
+        <div className="glass-tile glass-tile-edge glass-shine relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl">
+          {avatar ? (
+            <img
+              src={avatar}
+              alt="个人头像"
+              className="h-full w-full object-cover"
+              draggable={false}
+            />
+          ) : (
+            <User className="h-6 w-6 text-argent-300" />
+          )}
+        </div>
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-argent-300">
+            自定义聊天头像，会显示在对话中你的消息旁。
+          </p>
+          <div className="flex items-center gap-2">
+            <GlassButton
+              variant="ghost"
+              size="sm"
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              className="shrink-0"
+            >
+              {uploading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <ImagePlus className="h-3.5 w-3.5" />
+              )}
+              <span>{uploading ? "上传中..." : "选择图片"}</span>
+            </GlassButton>
+            {avatar && (
+              <GlassButton
+                variant="ghost"
+                size="sm"
+                onClick={handleClear}
+                className="shrink-0 text-argent-300 hover:text-crimson-300"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>清除</span>
+              </GlassButton>
+            )}
+          </div>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              handleUpload(e.target.files);
+              e.target.value = "";
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AboutTab() {
   const techStack = ["Tauri 2.0", "React 18", "Rust", "TypeScript"];
   const [checking, setChecking] = useState(false);
@@ -794,7 +942,7 @@ function AboutTab() {
       } else {
         setUpdateInfo({
           available: false,
-          message: "当前已是最新版本 v1.1.3",
+          message: "当前已是最新版本 v1.1.4",
         });
       }
     } catch (e) {
@@ -807,6 +955,9 @@ function AboutTab() {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* 个人头像设置 */}
+      <UserAvatarCard />
+
       <div className="glass glass-edge rounded-2xl p-6 shadow-xl">
         <div className="flex items-center gap-4">
           <div className="glass-tile glass-tile-strong flex h-14 w-14 items-center justify-center rounded-2xl text-2xl">
@@ -816,7 +967,7 @@ function AboutTab() {
             <h2 className="text-lg font-semibold text-white">小林 AI</h2>
             <div className="mt-0.5 flex items-center gap-2">
               <span className="rounded-full bg-titanium-500/15 border border-titanium-500/30 px-2 py-0.5 text-[11px] text-titanium-300">
-                v1.1.3
+                v1.1.4
               </span>
               <span className="text-xs text-argent-400">桌面 AI 助手</span>
             </div>

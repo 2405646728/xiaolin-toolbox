@@ -115,10 +115,10 @@ export function Magnifier({
         backdropFilter: `blur(2px) saturate(180%) brightness(1.1)`,
         WebkitBackdropFilter: `blur(2px) saturate(180%) brightness(1.1)`,
         background:
-          "radial-gradient(circle at 35% 30%, rgba(255,255,255,0.18), rgba(255,110,64,0.06) 60%, rgba(0,0,0,0.12))",
+          "radial-gradient(circle at 35% 30%, rgba(255,255,255,0.18), rgba(59,110,245,0.06) 60%, rgba(0,0,0,0.12))",
         border: "1.5px solid rgba(255,255,255,0.35)",
         boxShadow:
-          "0 8px 32px rgba(0,0,0,0.4), inset 0 2px 6px rgba(255,255,255,0.4), inset 0 -2px 8px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,110,64,0.15)",
+          "0 8px 32px rgba(0,0,0,0.4), inset 0 2px 6px rgba(255,255,255,0.4), inset 0 -2px 8px rgba(0,0,0,0.3), 0 0 0 1px rgba(59,110,245,0.15)",
       }}
     >
       {/* 放大镜内部放大装饰层 */}
