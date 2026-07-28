@@ -38,6 +38,7 @@ type RenderItem =
       resultStep?: AgentStep;
       status: "running" | "done" | "failed";
     }
+  | { kind: "waiting"; step: AgentStep }
   | { kind: "final"; step: AgentStep }
   | { kind: "error"; step: AgentStep };
 
@@ -47,6 +48,8 @@ function buildRenderItems(steps: AgentStep[]): RenderItem[] {
     const s = steps[i];
     if (s.type === "thinking") {
       items.push({ kind: "thinking", step: s });
+    } else if (s.type === "waiting") {
+      items.push({ kind: "waiting", step: s });
     } else if (s.type === "tool_call") {
       // 向后查找匹配的 tool_result（遇到下一个 tool_call 即停止）
       let resultStep: AgentStep | undefined;
@@ -313,6 +316,29 @@ function ErrorCard({ step }: { step: AgentStep }) {
 }
 
 // ============================================================
+// 等待卡片：琥珀色，表示任务排队等待用户空闲
+// ============================================================
+
+function WaitingCard({ step }: { step: AgentStep }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ type: "spring", stiffness: 300, damping: 24 }}
+      className="glass-tile glass-tile-edge rounded-xl shadow-lg p-3 border border-amber-500/40"
+    >
+      <div className="flex items-center gap-2">
+        <Loader2 size={15} className="animate-spin text-amber-400" />
+        <span className="text-xs font-medium text-amber-400">排队等待</span>
+      </div>
+      <div className="mt-1.5 text-xs text-argent-200 break-words">
+        {step.content ?? "等待用户空闲…"}
+      </div>
+    </motion.div>
+  );
+}
+
+// ============================================================
 // 空状态
 // ============================================================
 
@@ -411,6 +437,8 @@ export function TaskProgress({
                   );
                 case "tool":
                   return <ToolCard key={key} item={item} />;
+                case "waiting":
+                  return <WaitingCard key={key} step={item.step} />;
                 case "final":
                   return <FinalCard key={key} step={item.step} />;
                 case "error":

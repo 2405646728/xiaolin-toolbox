@@ -1271,6 +1271,59 @@ fn bluetooth_toggle(enable: bool) -> Result<(), String> {
 
 // ============================ 应用入口 ============================
 
+/// 获取用户空闲时间（秒）- 自上次鼠标键盘输入以来经过的秒数
+/// 用于判断用户是否在操作电脑，决定 AI 执行策略
+#[tauri::command]
+fn get_user_idle_seconds() -> Result<u64, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::SystemInformation::GetTickCount;
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetLastInputInfo;
+        use windows::Win32::UI::Input::KeyboardAndMouse::LASTINPUTINFO;
+
+        unsafe {
+            let mut lii = LASTINPUTINFO {
+                cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+                dwTime: 0,
+            };
+            if GetLastInputInfo(&mut lii).as_bool() {
+                let now = GetTickCount();
+                let idle_ms = now.saturating_sub(lii.dwTime);
+                return Ok((idle_ms / 1000) as u64);
+            }
+            Err("GetLastInputInfo 失败".into())
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("此功能仅在 Windows 可用".into())
+    }
+}
+
+/// 获取桌面路径（用于产出文件默认存放位置）
+#[tauri::command]
+fn get_desktop_path() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        // 优先用环境变量，失败时降级到 PowerShell
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let desktop = format!("{}\\Desktop", profile);
+            if std::path::Path::new(&desktop).exists() {
+                return Ok(desktop);
+            }
+        }
+        // 降级：通过 PowerShell 查询
+        run_powershell("[Environment]::GetFolderPath('Desktop')")
+            .ok_or_else(|| "无法获取桌面路径".into())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs::desktop_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .ok_or_else(|| "无法获取桌面路径".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1332,7 +1385,10 @@ pub fn run() {
             wifi_status,
             wifi_toggle,
             bluetooth_status,
-            bluetooth_toggle
+            bluetooth_toggle,
+            // 用户状态与路径
+            get_user_idle_seconds,
+            get_desktop_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

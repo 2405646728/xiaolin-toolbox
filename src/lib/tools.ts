@@ -226,20 +226,20 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "write_file",
-      description: "写入文本文件（覆盖已存在内容）。属于危险操作，执行前需用户确认。",
+      description: "写入文本文件（覆盖已存在内容）。若未指定 path 或使用纯文件名，默认保存到「桌面/小林AI产出/」目录。属于危险操作，执行前需用户确认。",
       parameters: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "文件绝对路径",
+            description: "文件路径。可省略扩展名；为纯文件名或留空时自动使用「桌面/小林AI产出/」目录",
           },
           content: {
             type: "string",
             description: "要写入的文本内容",
           },
         },
-        required: ["path", "content"],
+        required: ["content"],
       },
     },
   },
@@ -832,8 +832,36 @@ export async function executeTool(
   if (name === "wifi_status" || name === "bluetooth_status") {
     delete args.enable;
   }
+
+  // write_file：未指定 path 或纯文件名时，默认保存到「桌面/小林AI产出/」
+  if (name === "write_file") {
+    const rawPath = typeof args.path === "string" ? args.path.trim() : "";
+    // 判断是否为纯文件名（无盘符、无斜杠）或为空
+    const isBareName = !rawPath || (
+      !rawPath.includes(":") && !rawPath.includes("/") && !rawPath.includes("\\")
+    );
+    if (isBareName) {
+      const desktop = await invoke("get_desktop_path", {});
+      if (typeof desktop === "string") {
+        const dir = `${desktop}\\小林AI产出`;
+        // 确保目录存在
+        try {
+          await invoke("run_shell", { command: `if (!(Test-Path '${dir}')) { New-Item -ItemType Directory -Path '${dir}' -Force | Out-Null }` });
+        } catch {
+          // 目录创建失败不阻断，write_file 会报错
+        }
+        const fileName = rawPath || `输出_${Date.now()}.txt`;
+        args.path = `${dir}\\${fileName}`;
+      }
+    }
+  }
+
   try {
     const result = await invoke(name, args as Record<string, unknown>);
+    // write_file 成功时返回最终路径，便于 UI 显示文件位置
+    if (name === "write_file" && typeof args.path === "string") {
+      return { success: true, data: { path: args.path } };
+    }
     return { success: true, data: result };
   } catch (e: any) {
     // Tauri 抛出的错误可能是字符串或 { message } 或 Error
@@ -905,8 +933,12 @@ export function formatToolResult(
       }
       return "已读取文件";
     }
-    case "write_file":
+    case "write_file": {
+      if (data && typeof data === "object" && typeof (data as any).path === "string") {
+        return `已写入文件：${(data as any).path}`;
+      }
       return "已写入文件";
+    }
     case "delete_file":
       return "已删除";
     case "move_file":

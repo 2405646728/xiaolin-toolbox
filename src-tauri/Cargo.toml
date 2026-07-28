@@ -1,6 +1,6 @@
 [package]
 name = "xiaolin-ai"
-version = "1.0.0"
+version = "1.1.6"
 description = "小林 AI - 对话型 AI 助手"
 authors = ["you"]
 edition = "2021"
@@ -32,7 +32,10 @@ image = "0.25"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_SystemInformation",
 ] }
+dirs = "5"
 
 [profile.release]
 panic = "abort"

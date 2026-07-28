@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 import { startScheduler } from "@/lib/scheduler";
 import { runAgent, SYSTEM_PROMPT, type AgentStep } from "@/lib/agent";
 import {
-  loadLLMConfig,
+  loadLLMConfig, visionChat,
   type LLMConfig, type ChatMessage as LLMChatMessage,
   AuthError, NetworkError, RateLimitError, QuotaError,
 } from "@/lib/llm";
@@ -344,21 +344,45 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
         });
       }
 
-      // 当前用户消息：若有图片附件，构造多模态 content
+      // 当前用户消息：若有图片附件，先用视觉模型把图片转为文字描述
+      // （文本模型如 qwen2.5 不支持多模态，直接发会报 400 错误）
+      let finalUserText = userText;
       if (attachments.length > 0) {
-        const parts: LLMChatMessage["content"] = [];
-        if (userText) {
-          parts.push({ type: "text", text: userText });
-        } else {
-          parts.push({ type: "text", text: "请分析这张图片。" });
+        try {
+          const visionResult = await visionChat({
+            config: cfg,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: "请详细描述这张图片的内容，包括可见的文字、UI 元素、场景、对象、颜色、布局等所有细节，以便后续基于描述进行分析。",
+                  },
+                  ...attachments.map((att) => ({
+                    type: "image_url" as const,
+                    image_url: { url: att.url },
+                  })),
+                ],
+              },
+            ],
+            signal: controller.signal,
+            conversationId: convId ?? undefined,
+          });
+          const imageDesc = visionResult.content || "（图片描述失败）";
+          // 把图片描述拼接到用户文本后，作为纯文本发给文本模型
+          finalUserText = [
+            userText || "请分析这张图片。",
+            "",
+            "【图片内容描述】",
+            imageDesc,
+          ].join("\n");
+        } catch {
+          // 视觉模型失败时，降级为纯文本提示
+          finalUserText = userText || "（用户发送了图片，但视觉模型解析失败）";
         }
-        for (const att of attachments) {
-          parts.push({ type: "image_url", image_url: { url: att.url } });
-        }
-        historyMessages.push({ role: "user", content: parts });
-      } else {
-        historyMessages.push({ role: "user", content: userText });
       }
+      historyMessages.push({ role: "user", content: finalUserText });
 
       try {
         await runAgent({

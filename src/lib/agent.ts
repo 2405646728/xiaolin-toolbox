@@ -16,18 +16,89 @@ import {
 import { loadSecurity, shouldConfirmTool, checkShellCommand } from "./security";
 
 // ============================================================
+// GUI 工具集合：会干扰用户操作的 GUI 自动化工具
+// 用户活跃时（最近 2 分钟内有鼠标键盘输入）这些工具排队等待，
+// 等用户空闲后再执行；用户可通过中断信号取消等待
+// ============================================================
+
+const GUI_TOOLS = new Set([
+  "mouse_move", "mouse_click", "mouse_double_click", "mouse_right_click",
+  "mouse_drag", "mouse_scroll",
+  "keyboard_type", "keyboard_press", "keyboard_hotkey",
+  "open_app", "open_url", "search_web",
+  "focus_window", "minimize_window", "maximize_window", "close_window",
+  "set_volume", "mute_volume", "unmute_volume",
+  "power_sleep", "power_restart", "power_shutdown",
+]);
+
+/** 用户空闲阈值（秒）：超过此时间无输入视为空闲，AI 可自主操控 */
+const IDLE_THRESHOLD_SECONDS = 120;
+
+/** 等待轮询间隔（毫秒） */
+const WAIT_POLL_INTERVAL_MS = 10_000;
+
+/** 动态加载 Tauri invoke */
+async function getInvoke(): Promise<((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null> {
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return null;
+  try {
+    const mod = await import("@tauri-apps/api/core");
+    return mod.invoke as typeof mod.invoke;
+  } catch {
+    return null;
+  }
+}
+
+/** 查询用户空闲秒数（非 Tauri 环境返回 0，视为始终空闲） */
+async function getUserIdleSeconds(): Promise<number> {
+  const invoke = await getInvoke();
+  if (!invoke) return Infinity; // 浏览器环境视为始终空闲
+  try {
+    const sec = await invoke("get_user_idle_seconds", {});
+    return typeof sec === "number" ? sec : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 等待用户空闲（空闲时间达到阈值）
+ * 每 WAIT_POLL_INTERVAL_MS 轮询一次，期间检查中断信号
+ * @returns true=已空闲可以继续，false=被中断
+ */
+async function waitForUserIdle(signal?: AbortSignal): Promise<boolean> {
+  while (true) {
+    if (signal?.aborted) return false;
+    const idle = await getUserIdleSeconds();
+    if (idle >= IDLE_THRESHOLD_SECONDS) return true;
+    // 等待下一轮询
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, WAIT_POLL_INTERVAL_MS);
+      // 支持中断提前唤醒
+      if (signal) {
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+  }
+}
+
+// ============================================================
 // 1. 类型定义
 // ============================================================
 
 /** 单个 ReAct 步骤记录 */
 export interface AgentStep {
   index: number; // 步骤序号（从 1 开始）
-  type: "thinking" | "tool_call" | "tool_result" | "final" | "error";
+  type: "thinking" | "tool_call" | "tool_result" | "final" | "error" | "waiting";
   // thinking: AI 思考文本
   // tool_call: AI 决定调用工具
   // tool_result: 工具执行结果
   // final: AI 最终回复（任务完成）
   // error: 错误信息
+  // waiting: 等待用户空闲（GUI 工具遇到用户活跃时排队）
   content?: string; // thinking/final/error 的文本
   toolCall?: {
     id: string;
@@ -129,7 +200,16 @@ export const SYSTEM_PROMPT = `你是小林 AI，一个能自主操控电脑的�
 ## 安全边界
 - 不会执行 format/del/rd/rmdir 等破坏性命令
 - 删除文件、终止进程、关机等危险操作需要用户确认
-- 不会修改系统关键目录（C:\\Windows 等）`;
+- 不会修改系统关键目录（C:\\Windows 等）
+
+## 执行策略（重要）
+系统会自动检测用户是否在使用电脑：
+- **用户活跃时**（最近 2 分钟内有鼠标键盘输入）：GUI 操作类工具（鼠标、键盘、打开应用等）会自动排队等待，直到用户空闲再执行。文件读写、系统信息查询等非干扰操作不受影响。
+- **用户空闲时**：所有工具立即执行，AI 可自主操控电脑完成任务。
+
+## 文件产出
+- 调用 write_file 时若未指定路径或使用纯文件名，默认保存到「桌面/小林AI产出/」目录
+- 任务完成后应在最终回复中告知用户产出文件的完整路径`;
 
 // ============================================================
 // 3. 辅助函数
@@ -391,6 +471,54 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
                 tool_call_id: toolCallId,
               });
               continue;
+            }
+          }
+
+          // GUI 工具：用户活跃时排队等待，避免抢占用户操作
+          if (GUI_TOOLS.has(toolName)) {
+            let idleSec = await getUserIdleSeconds();
+            if (idleSec < IDLE_THRESHOLD_SECONDS) {
+              // 推送等待步骤到 UI
+              const waitingStep: AgentStep = {
+                index: step,
+                type: "waiting",
+                toolCall: toolCallInfo,
+                content: `用户正在使用电脑（空闲 ${Math.floor(idleSec)}秒），任务排队等待中…`,
+                timestamp: Date.now(),
+              };
+              steps.push(waitingStep);
+              safeCall(callbacks.onStep, waitingStep);
+
+              const idle = await waitForUserIdle(signal);
+              if (!idle) {
+                // 被中断
+                result = { success: false, error: "任务已中断" };
+                const toolResultStep: AgentStep = {
+                  index: step,
+                  type: "tool_result",
+                  toolCall: toolCallInfo,
+                  toolResult: result,
+                  timestamp: Date.now(),
+                };
+                steps.push(toolResultStep);
+                safeCall(callbacks.onToolResult, result, toolName);
+                safeCall(callbacks.onStep, toolResultStep);
+                workingMessages.push({
+                  role: "tool",
+                  content: "执行失败：任务已中断",
+                  tool_call_id: toolCallId,
+                });
+                break;
+              }
+              // 等待结束，推送恢复提示
+              const resumedStep: AgentStep = {
+                index: step,
+                type: "waiting",
+                content: "用户已空闲，继续执行任务",
+                timestamp: Date.now(),
+              };
+              steps.push(resumedStep);
+              safeCall(callbacks.onStep, resumedStep);
             }
           }
 

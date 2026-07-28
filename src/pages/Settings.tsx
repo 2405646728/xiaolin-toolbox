@@ -909,9 +909,20 @@ function UserAvatarCard() {
 function AboutTab() {
   const techStack = ["Tauri 2.0", "React 18", "Rust", "TypeScript"];
   const [checking, setChecking] = useState(false);
-  const [updateInfo, setUpdateInfo] = useState<{ available: boolean; version?: string; message: string } | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<{
+    available: boolean;
+    version?: string;
+    message: string;
+  } | null>(null);
+  // 发现新版本后暂存更新详情，待用户确认后再下载安装
+  const [pendingUpdate, setPendingUpdate] = useState<{
+    version: string;
+    notes: string;
+    update: any; // Tauri updater Update 实例
+  } | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
-  // 检查更新：通过 Tauri updater 插件查询最新版本
+  // 检查更新：通过 Tauri updater 插件查询最新版本（不自动下载）
   const handleCheckUpdate = async () => {
     // 浏览器环境直接提示（不进入 try 避免误导）
     if (!isTauri) {
@@ -923,24 +934,26 @@ function AboutTab() {
     }
     setChecking(true);
     setUpdateInfo(null);
+    setPendingUpdate(null);
     try {
       const updater = await loadUpdaterModule();
-      const processApi = await loadProcessModule();
       const update = await updater.check();
       if (update?.available) {
+        // 不自动下载，暂存更新信息等用户确认
+        setPendingUpdate({
+          version: update.version,
+          notes: update.body || "暂无更新说明",
+          update,
+        });
         setUpdateInfo({
           available: true,
           version: update.version,
-          message: `发现新版本 v${update.version}，正在下载...`,
+          message: `发现新版本 v${update.version}，请查看下方更新内容后决定是否安装`,
         });
-        // 下载并安装
-        await update.downloadAndInstall();
-        // 安装完成后重启应用
-        await processApi.relaunch();
       } else {
         setUpdateInfo({
           available: false,
-          message: "当前已是最新版本 v1.1.4",
+          message: "当前已是最新版本",
         });
       }
     } catch (e) {
@@ -949,6 +962,32 @@ function AboutTab() {
     } finally {
       setChecking(false);
     }
+  };
+
+  // 用户确认后再下载并安装
+  const handleConfirmInstall = async () => {
+    if (!pendingUpdate) return;
+    setDownloading(true);
+    try {
+      const processApi = await loadProcessModule();
+      await pendingUpdate.update.downloadAndInstall();
+      // 安装完成后重启应用
+      await processApi.relaunch();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "下载安装失败";
+      setUpdateInfo({ available: false, message: msg });
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  // 用户取消更新
+  const handleCancelUpdate = () => {
+    setPendingUpdate(null);
+    setUpdateInfo({
+      available: false,
+      message: "已跳过此次更新",
+    });
   };
 
   return (
@@ -976,11 +1015,11 @@ function AboutTab() {
         </p>
         {/* 检查更新 */}
         <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-white/10 pt-4">
-          <GlassButton variant="primary" onClick={handleCheckUpdate} disabled={checking}>
+          <GlassButton variant="primary" onClick={handleCheckUpdate} disabled={checking || downloading}>
             {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             <span>{checking ? "检查中..." : "检查更新"}</span>
           </GlassButton>
-          {updateInfo && (
+          {updateInfo && !pendingUpdate && (
             <div className={cn(
               "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs",
               updateInfo.available
@@ -992,6 +1031,59 @@ function AboutTab() {
             </div>
           )}
         </div>
+
+        {/* 发现新版本：展示更新内容，等待用户确认是否安装 */}
+        {pendingUpdate && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mt-3 overflow-hidden"
+          >
+            <div className="glass-tile glass-tile-edge rounded-xl border border-titanium-500/30 p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Download size={14} className="text-titanium-300" />
+                  <span className="text-sm font-medium text-white">
+                    发现新版本 v{pendingUpdate.version}
+                  </span>
+                </div>
+                <span className="text-[11px] text-argent-400">待确认安装</span>
+              </div>
+              <div className="mt-3">
+                <div className="text-xs font-medium text-argent-300 mb-1.5">本次更新内容</div>
+                <div className="rounded-lg bg-base-900/40 border border-white/10 p-3 max-h-48 overflow-y-auto">
+                  <pre className="text-xs text-argent-100 whitespace-pre-wrap break-words font-sans leading-relaxed">
+                    {pendingUpdate.notes}
+                  </pre>
+                </div>
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <GlassButton
+                  variant="primary"
+                  onClick={handleConfirmInstall}
+                  disabled={downloading}
+                >
+                  {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                  <span>{downloading ? "下载安装中..." : "立即下载安装"}</span>
+                </GlassButton>
+                <GlassButton
+                  variant="ghost"
+                  onClick={handleCancelUpdate}
+                  disabled={downloading}
+                >
+                  <X size={14} />
+                  <span>暂不更新</span>
+                </GlassButton>
+              </div>
+              {downloading && (
+                <p className="mt-2 text-[11px] text-argent-400">
+                  下载安装期间请勿关闭应用，安装完成后将自动重启。
+                </p>
+              )}
+            </div>
+          </motion.div>
+        )}
       </div>
 
       <div className="glass glass-edge rounded-2xl p-5 shadow-xl">
