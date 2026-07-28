@@ -658,7 +658,6 @@ function MessageBubble({ message }: { message: UIMessage }) {
         {hasSteps && (
           <TaskProgress
             steps={message.steps!}
-            maxSteps={MAX_STEPS}
             isRunning={!!message.isRunning}
           />
         )}

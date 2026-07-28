@@ -21,7 +21,6 @@ import { cn } from "@/lib/utils";
 
 export interface TaskProgressProps {
   steps: AgentStep[]; // 所有步骤
-  maxSteps: number; // 最大步数（用于进度条）
   isRunning: boolean; // 是否正在执行
   className?: string;
 }
@@ -338,7 +337,6 @@ function EmptyState({ isRunning }: { isRunning: boolean }) {
 
 export function TaskProgress({
   steps,
-  maxSteps,
   isRunning,
   className,
 }: TaskProgressProps) {
@@ -364,8 +362,12 @@ export function TaskProgress({
       it.kind === "error" ||
       (it.kind === "tool" && it.status !== "running")
   ).length;
-  const progress = Math.min(completedCount / maxSteps, 1);
   const showSpinner = isRunning && !hasFinal && !hasError;
+
+  // 进度条：不预设总步数，用"已完成 / (已完成+1)"表示进行中
+  // 任务完成/出错时进度满
+  const progressDenom = hasFinal || hasError ? completedCount : completedCount + 1;
+  const progress = Math.min(completedCount / Math.max(progressDenom, 1), 1);
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
@@ -378,7 +380,9 @@ export function TaskProgress({
           />
           <span className="text-xs font-medium text-argent-100">{statusText}</span>
           <span className="ml-auto font-mono text-xs text-argent-300">
-            第 {completedCount} / {maxSteps} 步
+            {hasFinal || hasError
+              ? `共 ${completedCount} 步`
+              : `第 ${completedCount + 1} 步`}
           </span>
         </div>
         {/* 横向进度条 */}
