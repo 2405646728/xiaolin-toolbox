@@ -6,7 +6,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
-  Send, Sparkles, User, Settings as SettingsIcon,
+  Send, User, Settings as SettingsIcon,
   AlertTriangle, CheckCircle2, Loader2,
   PanelLeftClose, PanelLeftOpen, Square, WifiOff, Eraser,
   Zap, Clock, ImagePlus, X,
@@ -287,7 +287,7 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
         // 首条消息自动生成对话标题
         const conv = getConversation(convId);
         if (conv && conv.messages.length <= 1) {
-          const title = await generateConversationTitle(content || "图片消息");
+          const title = generateConversationTitle(content || "图片消息");
           updateConversation(convId, { title });
         }
       }

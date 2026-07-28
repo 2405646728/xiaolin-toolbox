@@ -140,12 +140,6 @@ function generateToolCallId(): string {
   return "call_" + Math.random().toString(36).substring(2, 11);
 }
 
-/** 简单估算 tokens（备用，按字符数 / 4） */
-function estimateTokens(text: string): number {
-  if (!text) return 0;
-  return Math.ceil(text.length / 4);
-}
-
 /** 安全触发回调，吞掉异常避免影响主流程 */
 function safeCall(
   fn: ((...args: any[]) => void) | undefined,

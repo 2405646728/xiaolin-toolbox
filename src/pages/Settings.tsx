@@ -57,8 +57,6 @@ const DEFAULT_CONFIG: LLMConfig = {
   maxTokens: 8000,
 };
 
-const SECURITY_KEY = "xiaolin-ai-security";
-
 // SecurityConfig 类型与默认值已移至 @/lib/security
 // COMMAND_BLOCKLIST 也从 @/lib/security 导入
 

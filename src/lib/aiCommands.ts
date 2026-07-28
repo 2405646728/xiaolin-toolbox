@@ -657,6 +657,8 @@ export async function executeCommand(
         return { text: "表达式包含非法字符，仅支持数字和 + - * / ( )", status: "error" };
       }
       try {
+        // 表达式已通过正则校验（仅数字和运算符），Function 构造器用于安全求值
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval
         const result = Function(`"use strict"; return (${expr})`)();
         return { text: `${expr} = ${result}`, status: "success", executed: true };
       } catch {

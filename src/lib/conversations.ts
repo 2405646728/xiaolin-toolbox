@@ -249,9 +249,9 @@ export function getCurrentConversation(): Conversation | null {
  * 根据首条用户消息生成对话标题
  * 简单实现：截取前 20 个字符，超出则补 "..."，不调用 LLM
  */
-export async function generateConversationTitle(
+export function generateConversationTitle(
   firstUserMessage: string
-): Promise<string> {
+): string {
   const text = (firstUserMessage || "").trim();
   if (text.length <= 20) return text || "新对话";
   return text.slice(0, 20) + "...";
@@ -284,7 +284,8 @@ export function toChatMessages(conversation: Conversation): ChatMessage[] {
 
 /** 估算单条消息的 tokens：(content 字符数 + tool_calls JSON 字符数) / 4 */
 function estimateMessageTokens(m: ChatMessage): number {
-  let s = m.content || "";
+  const contentStr = typeof m.content === "string" ? m.content : "";
+  let s = contentStr || "";
   if (m.tool_calls) {
     try {
       s += JSON.stringify(m.tool_calls);
