@@ -3,13 +3,15 @@
 // 在线模式：调用 runAgent 执行 ReAct 循环（thinking → tool_call → result → final）
 // 离线模式：用 aiCommands.matchCommand 本地解析（降级方案，70+ 命令）
 
-import { useState, useRef, useEffect, useCallback } from "react";
-import { motion } from "framer-motion";
+import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   Send, User, Settings as SettingsIcon,
   AlertTriangle, CheckCircle2, Loader2,
   PanelLeftClose, PanelLeftOpen, Square, WifiOff, Eraser,
-  Zap, Clock, ImagePlus, X,
+  Zap, Clock, ImagePlus, X, Shield, Sparkles,
+  FileText, Eye, Database, RefreshCw, Power,
+  ToggleLeft, SlidersHorizontal, Bug, Layers,
 } from "lucide-react";
 import { GlassCard } from "@/components/glass/GlassCard";
 import { LiquidButton } from "@/components/liquid/LiquidButton";
@@ -23,7 +25,7 @@ import { cn } from "@/lib/utils";
 import { startScheduler } from "@/lib/scheduler";
 import { runAgent, SYSTEM_PROMPT, type AgentStep } from "@/lib/agent";
 import {
-  loadLLMConfig, visionChat,
+  loadLLMConfig, saveLLMConfig, visionChat,
   type LLMConfig, type ChatMessage as LLMChatMessage,
   AuthError, NetworkError, RateLimitError, QuotaError,
 } from "@/lib/llm";
@@ -39,6 +41,16 @@ import {
   type AIResponse,
 } from "@/lib/aiCommands";
 import { loadUserAvatar, fileToDataUrl } from "@/lib/userAvatar";
+import { loadSecurity, saveSecurity, type SecurityConfig } from "@/lib/security";
+import {
+  loadHiddenConfig, saveHiddenConfig, resetAllData, estimateStorageUsage, formatBytes,
+  type HiddenConfig,
+} from "@/lib/hiddenConfig";
+import {
+  installLogger, setRecording, getLogs, clearLogs, subscribeLogs,
+  levelColorClass, formatTime, type LogEntry,
+} from "@/lib/logger";
+import { saveTasks, loadTasks } from "@/lib/scheduler";
 
 // ---------- 类型与常量 ----------
 
@@ -68,6 +80,13 @@ interface UIMessage {
 const QUICK_COMMANDS = ["截屏看看", "打开记事本", "搜索周杰伦", "当前时间", "获取系统状态"];
 const MAX_STEPS = 20;
 const WELCOME_TEXT = "你好！我是小林 AI，能自主操控你的电脑完成复杂任务。\n\n告诉我你想做什么，例如：\n· 「去 B 站搜索周杰伦并点赞」\n· 「打开记事本写一份会议纪要」\n· 「整理下载文件夹」\n\n未配置 API 时自动切换为离线命令模式（70+ 本地命令）。";
+
+// 隐藏菜单触发序列：↑↑↓↓←→←→
+const KONAMI_SEQUENCE = [
+  "ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown",
+  "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight",
+];
+const KONAMI_RESET_MS = 2000; // 序列输入间隔超过此时间则重置
 
 function genId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -126,6 +145,12 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
   const [pendingAttachments, setPendingAttachments] = useState<ImageAttachment[]>([]);
   // 用户自定义头像
   const [userAvatar, setUserAvatar] = useState<string | null>(() => loadUserAvatar());
+  // 隐藏菜单（通过 ↑↑↓↓←→←→ 触发）
+  const [hiddenMenuOpen, setHiddenMenuOpen] = useState(false);
+  // 安全策略快速开关（隐藏菜单内可调整）
+  const [security, setSecurity] = useState<SecurityConfig>(loadSecurity);
+  // 隐藏配置：动态参数 + 调试开关（隐藏菜单内可调整）
+  const [hiddenConfig, setHiddenConfig] = useState<HiddenConfig>(loadHiddenConfig);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -134,6 +159,9 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
   messagesRef.current = messages;
   // 文件选择 input（隐藏，由按钮触发）
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // 隐藏菜单键盘序列检测：记录当前已匹配的位置
+  const konamiPosRef = useRef(0);
+  const konamiLastTimeRef = useRef(0);
 
   // 添加图片文件到待发送附件（限制最多 5 张，单张 10MB）
   const addImageFiles = useCallback(async (files: FileList | File[]) => {
@@ -200,7 +228,7 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
     e.preventDefault();
   }, []);
 
-  const isOnline = llmConfig !== null;
+  const isOnline = llmConfig !== null && !hiddenConfig.forceOffline;
 
   // 初始化：加载 LLM 配置 + 加载或创建当前对话
   useEffect(() => {
@@ -217,6 +245,13 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
 
     const uiMsgs = conv.messages.map(convMsgToUIMsg);
     setMessages(uiMsgs.length > 0 ? uiMsgs : [makeWelcome()]);
+  }, []);
+
+  // 安装日志拦截器 + 同步调试模式开关
+  // 仅安装一次，recording 状态由 hiddenConfig.debugMode 控制
+  useEffect(() => {
+    installLogger();
+    setRecording(loadHiddenConfig().debugMode);
   }, []);
 
   // 监听用户头像变更事件（设置页上传/清除头像时触发）
@@ -331,6 +366,127 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
     return stopScheduler;
   }, []);
 
+  // 隐藏菜单：监听 ↑↑↓↓←→←→ 键盘序列
+  // 即使输入框聚焦也检测（方向键光标移动不影响序列匹配）
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // 隐藏菜单已打开时不再触发（按 Esc 关闭）
+      if (hiddenMenuOpen) return;
+
+      const key = e.key;
+      if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) return;
+
+      const now = Date.now();
+      // 间隔超时则重置序列
+      if (now - konamiLastTimeRef.current > KONAMI_RESET_MS) {
+        konamiPosRef.current = 0;
+      }
+      konamiLastTimeRef.current = now;
+
+      const expected = KONAMI_SEQUENCE[konamiPosRef.current];
+      if (key === expected) {
+        konamiPosRef.current += 1;
+        if (konamiPosRef.current === KONAMI_SEQUENCE.length) {
+          konamiPosRef.current = 0;
+          setHiddenMenuOpen(true);
+          // 重新读取最新安全配置
+          setSecurity(loadSecurity());
+        }
+      } else {
+        // 不匹配：若当前键恰好是序列首键则从 1 开始，否则归零
+        konamiPosRef.current = key === KONAMI_SEQUENCE[0] ? 1 : 0;
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [hiddenMenuOpen]);
+
+  // 安全配置变更时持久化
+  const updateSecurity = useCallback((patch: Partial<SecurityConfig>) => {
+    setSecurity((prev) => {
+      const next = { ...prev, ...patch };
+      saveSecurity(next);
+      return next;
+    });
+  }, []);
+
+  // 隐藏配置变更时持久化 + 同步调试模式开关
+  const updateHiddenConfig = useCallback((patch: Partial<HiddenConfig>) => {
+    setHiddenConfig((prev) => {
+      const next = { ...prev, ...patch };
+      saveHiddenConfig(next);
+      // 调试模式变更时同步 logger recording 状态
+      if (patch.debugMode !== undefined) {
+        setRecording(patch.debugMode);
+      }
+      return next;
+    });
+  }, []);
+
+  // 批量操作：清空所有对话（保留当前会话壳，重置为欢迎页）
+  const handleClearAllConversations = useCallback(() => {
+    const convs = listConversations();
+    for (const c of convs) {
+      deleteConversation(c.id);
+    }
+    // 创建新会话作为当前会话
+    const newConv = createConversation("新对话");
+    setCurrentConversationId(newConv.id);
+    setCurrentConvId(newConv.id);
+    setMessages([makeWelcome()]);
+    setRefreshTrigger((n) => n + 1);
+  }, []);
+
+  // 批量操作：清空所有定时任务
+  const handleClearAllTasks = useCallback(() => {
+    saveTasks([]);
+    setRefreshTrigger((n) => n + 1);
+  }, []);
+
+  // 批量操作：立即执行所有启用的定时任务
+  const handleRunAllTasks = useCallback(() => {
+    const tasks = loadTasks().filter((t) => t.enabled);
+    for (const task of tasks) {
+      handleSendRef.current(task.command);
+    }
+  }, []);
+
+  // 批量操作：一键重置全部设置（清空所有 localStorage）
+  const handleResetAll = useCallback(() => {
+    resetAllData();
+    // 重置后重新加载所有状态
+    setSecurity(loadSecurity());
+    setHiddenConfig(loadHiddenConfig());
+    setLlmConfig(loadLLMConfig());
+    setRecording(false);
+    // 创建新会话
+    const newConv = createConversation("新对话");
+    setCurrentConversationId(newConv.id);
+    setCurrentConvId(newConv.id);
+    setMessages([makeWelcome()]);
+    setUserAvatar(loadUserAvatar());
+    setRefreshTrigger((n) => n + 1);
+  }, []);
+
+  // 快捷操作：文本/视觉模型互换
+  const handleSwapModels = useCallback(() => {
+    const cfg = loadLLMConfig();
+    if (!cfg) return;
+    const next = { ...cfg, model: cfg.visionModel, visionModel: cfg.model };
+    saveLLMConfig(next);
+    setLlmConfig(next);
+  }, []);
+
+  // 快捷操作：重启应用（Tauri 环境）
+  const handleRelaunch = useCallback(async () => {
+    try {
+      const mod = await import("@tauri-apps/plugin-process");
+      await mod.relaunch();
+    } catch {
+      console.warn("重启失败：非 Tauri 环境或插件不可用");
+    }
+  }, []);
+
   // 在线模式：ReAct Agent 流程
   const runAgentFlow = useCallback(
     async (
@@ -343,14 +499,15 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
       const controller = new AbortController();
       abortRef.current = controller;
 
-      // 构造上下文消息：system + 最近 10 条历史（含用户和 AI 回复，保持多轮上下文）
+      // 构造上下文消息：system + 最近 N 条历史（N 由隐藏菜单 contextMessageCount 控制，默认 10）
       // UIMessage.role 为 "user" | "ai"，映射到 LLM 的 "user" | "assistant"
+      const ctxCount = loadHiddenConfig().contextMessageCount;
       const historyMessages: LLMChatMessage[] = [
         { role: "system", content: SYSTEM_PROMPT },
       ];
       const recent = messagesRef.current
         .filter((m) => m.id !== aiMsgId && m.text && (m.role === "user" || m.role === "ai"))
-        .slice(-10);
+        .slice(-ctxCount);
       for (const m of recent) {
         // 跳过正在运行或错误的消息，避免脏数据污染上下文
         if (m.isRunning) continue;
@@ -824,7 +981,628 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
           handleSend(cmd);
         }}
       />
+
+      {/* ============ 隐藏菜单（↑↑↓↓←→←→ 触发）============ */}
+      <HiddenMenu
+        open={hiddenMenuOpen}
+        onClose={() => setHiddenMenuOpen(false)}
+        security={security}
+        onUpdateSecurity={updateSecurity}
+        hiddenConfig={hiddenConfig}
+        onUpdateHiddenConfig={updateHiddenConfig}
+        onClearAllConversations={handleClearAllConversations}
+        onClearAllTasks={handleClearAllTasks}
+        onRunAllTasks={handleRunAllTasks}
+        onResetAll={handleResetAll}
+        onSwapModels={handleSwapModels}
+        onRelaunch={handleRelaunch}
+        onOpenSettings={() => {
+          setHiddenMenuOpen(false);
+          onOpenSettings?.();
+        }}
+      />
     </div>
+  );
+}
+
+// ============================================================
+// 隐藏菜单组件
+// ============================================================
+
+interface HiddenMenuProps {
+  open: boolean;
+  onClose: () => void;
+  security: SecurityConfig;
+  onUpdateSecurity: (patch: Partial<SecurityConfig>) => void;
+  hiddenConfig: HiddenConfig;
+  onUpdateHiddenConfig: (patch: Partial<HiddenConfig>) => void;
+  onClearAllConversations: () => void;
+  onClearAllTasks: () => void;
+  onRunAllTasks: () => void;
+  onResetAll: () => void;
+  onSwapModels: () => void;
+  onRelaunch: () => void;
+  onOpenSettings: () => void;
+}
+
+function HiddenMenu({
+  open, onClose, security, onUpdateSecurity,
+  hiddenConfig, onUpdateHiddenConfig,
+  onClearAllConversations, onClearAllTasks, onRunAllTasks,
+  onResetAll, onSwapModels, onRelaunch,
+  onOpenSettings,
+}: HiddenMenuProps) {
+  // 顶部 Tab 分类：toggles=开关 / params=参数 / debug=调试 / batch=批量 / quick=快捷
+  type TabKey = "toggles" | "params" | "debug" | "batch" | "quick";
+  // 子面板视图：main=主菜单（Tab 切换），logs/prompt/storage=子详情页
+  type ViewKey = "main" | "logs" | "prompt" | "storage";
+  const [view, setView] = useState<ViewKey>("main");
+  const [tab, setTab] = useState<TabKey>("toggles");
+  const [confirmAction, setConfirmAction] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+
+  const TABS: Array<{ key: TabKey; label: string; icon: typeof ToggleLeft }> = [
+    { key: "toggles", label: "开关", icon: ToggleLeft },
+    { key: "params", label: "参数", icon: SlidersHorizontal },
+    { key: "debug", label: "调试", icon: Bug },
+    { key: "batch", label: "批量", icon: Layers },
+    { key: "quick", label: "快捷", icon: Zap },
+  ];
+
+  // Esc 关闭：子视图先返回 main，main 再关闭
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (view !== "main") setView("main");
+        else onClose();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, onClose, view]);
+
+  // 订阅日志更新（仅 logs 视图时订阅）
+  useEffect(() => {
+    if (!open || view !== "logs") return;
+    setLogs(getLogs());
+    const unsub = subscribeLogs((entries) => setLogs(entries));
+    return unsub;
+  }, [open, view]);
+
+  // 打开时重置到主视图 + 第一个 Tab
+  useEffect(() => {
+    if (open) {
+      setView("main");
+      setTab("toggles");
+      setConfirmAction(null);
+    }
+  }, [open]);
+
+  // 执行需二次确认的操作
+  const runConfirmed = (action: string, fn: () => void) => {
+    if (confirmAction === action) {
+      fn();
+      setConfirmAction(null);
+    } else {
+      setConfirmAction(action);
+      window.setTimeout(() => setConfirmAction((cur) => (cur === action ? null : cur)), 3000);
+    }
+  };
+
+  // 子视图标题
+  const subTitle =
+    view === "logs" ? "运行日志" :
+    view === "prompt" ? "系统提示词" :
+    view === "storage" ? "存储占用" : "隐藏控制面板";
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2 }}
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+          onClick={onClose}
+        >
+          {/* 背景毛玻璃遮罩 */}
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-md" />
+
+          {/* 菜单面板：左侧 Tab 导航 + 右侧内容区 */}
+          <motion.div
+            initial={{ opacity: 0, scale: 0.92, y: 16 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.92, y: 16 }}
+            transition={{ type: "spring", stiffness: 380, damping: 30 }}
+            onClick={(e) => e.stopPropagation()}
+            className="glass-strong glass-edge glass-shine relative z-10 flex w-full max-w-2xl max-h-[88vh] overflow-hidden rounded-3xl p-5 shadow-2xl"
+          >
+            {/* 顶部标题栏（绝对定位浮在面板上方） */}
+            <div className="absolute left-5 top-5 z-20 flex items-center gap-2.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-titanium-500/30 to-titanium-700/20 glass-tile-edge">
+                <Sparkles className="h-3.5 w-3.5 text-titanium-200" />
+              </div>
+              <div className="flex flex-col">
+                <span className="text-sm font-semibold text-white">{subTitle}</span>
+                <span className="text-[10px] text-argent-400">↑ ↑ ↓ ↓ ← → ← →</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="absolute right-5 top-5 z-20 rounded-lg p-1.5 text-argent-300 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+
+            {/* ============ 主视图：左侧 Tab + 右侧内容 ============ */}
+            {view === "main" && (
+              <div className="flex w-full gap-4 pt-14">
+                {/* 左侧垂直 Tab 导航栏 */}
+                <div className="flex w-24 shrink-0 flex-col gap-1 rounded-2xl border border-white/10 bg-base-900/40 p-1.5">
+                  {TABS.map((t) => {
+                    const Icon = t.icon;
+                    const active = tab === t.key;
+                    return (
+                      <button
+                        key={t.key}
+                        type="button"
+                        onClick={() => { setTab(t.key); setConfirmAction(null); }}
+                        className={cn(
+                          "flex flex-col items-center gap-1 rounded-xl px-2 py-3 text-[11px] font-medium transition-all",
+                          active
+                            ? "bg-gradient-to-br from-titanium-500/30 to-titanium-700/20 text-titanium-100 glass-tile-edge"
+                            : "text-argent-300 hover:bg-white/5 hover:text-white"
+                        )}
+                      >
+                        <Icon className="h-4 w-4" />
+                        {t.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* 右侧内容区 */}
+                <div className="flex-1 overflow-y-auto pr-1 min-h-[280px]">
+                  {/* ---- 开关 Tab ---- */}
+                  {tab === "toggles" && (
+                    <div className="flex flex-col gap-2">
+                      <ToggleRow
+                        label="用户活跃检测"
+                        desc={security.userActivityDetection ? "用户操作时排队等待" : "AI 始终自主执行"}
+                        checked={security.userActivityDetection}
+                        onChange={(v) => onUpdateSecurity({ userActivityDetection: v })}
+                      />
+                      <ToggleRow
+                        label="危险操作确认"
+                        desc={security.confirmDangerous ? "执行前需确认" : "全部直接执行"}
+                        checked={security.confirmDangerous}
+                        onChange={(v) => onUpdateSecurity({ confirmDangerous: v })}
+                      />
+                      <ToggleRow
+                        label="调试模式"
+                        desc={hiddenConfig.debugMode ? "记录 console 日志" : "不记录日志"}
+                        checked={hiddenConfig.debugMode}
+                        onChange={(v) => onUpdateHiddenConfig({ debugMode: v })}
+                      />
+                      <ToggleRow
+                        label="强制离线模式"
+                        desc={hiddenConfig.forceOffline ? "走本地 70+ 命令" : "使用 API 在线模式"}
+                        checked={hiddenConfig.forceOffline}
+                        onChange={(v) => onUpdateHiddenConfig({ forceOffline: v })}
+                      />
+                    </div>
+                  )}
+
+                  {/* ---- 参数 Tab ---- */}
+                  {tab === "params" && (
+                    <div className="flex flex-col gap-2">
+                      <NumberRow
+                        label="Agent 最大步数"
+                        desc="复杂任务需要更多步"
+                        value={hiddenConfig.maxSteps}
+                        min={1}
+                        max={100}
+                        onChange={(v) => onUpdateHiddenConfig({ maxSteps: v })}
+                      />
+                      <NumberRow
+                        label="用户空闲阈值（秒）"
+                        desc="超过此时间无输入视为空闲"
+                        value={hiddenConfig.idleThresholdSeconds}
+                        min={10}
+                        max={3600}
+                        onChange={(v) => onUpdateHiddenConfig({ idleThresholdSeconds: v })}
+                      />
+                      <NumberRow
+                        label="历史上下文条数"
+                        desc="影响多轮对话记忆"
+                        value={hiddenConfig.contextMessageCount}
+                        min={0}
+                        max={50}
+                        onChange={(v) => onUpdateHiddenConfig({ contextMessageCount: v })}
+                      />
+                      <NumberRow
+                        label="GUI 等待超时（分钟）"
+                        desc="超时后强制执行"
+                        value={Math.round(hiddenConfig.guiWaitTimeoutMs / 60000)}
+                        min={1}
+                        max={60}
+                        onChange={(v) => onUpdateHiddenConfig({ guiWaitTimeoutMs: v * 60000 })}
+                      />
+                      <NumberRow
+                        label="截图失败重试次数"
+                        desc="超限后不再自动截图"
+                        value={hiddenConfig.autoScreenshotMaxFailures}
+                        min={0}
+                        max={10}
+                        onChange={(v) => onUpdateHiddenConfig({ autoScreenshotMaxFailures: v })}
+                      />
+                      <NumberRow
+                        label="每日费用上限（元）"
+                        desc="超过后拦截任务（0=不限）"
+                        value={security.dailyCostLimit}
+                        min={0}
+                        max={1000}
+                        onChange={(v) => onUpdateSecurity({ dailyCostLimit: v })}
+                      />
+                    </div>
+                  )}
+
+                  {/* ---- 调试 Tab ---- */}
+                  {tab === "debug" && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <ActionButton onClick={() => setView("logs")} icon={<FileText className="h-4 w-4" />}>
+                        日志查看器
+                      </ActionButton>
+                      <ActionButton onClick={() => setView("prompt")} icon={<Eye className="h-4 w-4" />}>
+                        System Prompt
+                      </ActionButton>
+                      <ActionButton onClick={() => setView("storage")} icon={<Database className="h-4 w-4" />}>
+                        存储占用
+                      </ActionButton>
+                      <ActionButton onClick={onSwapModels} icon={<RefreshCw className="h-4 w-4" />}>
+                        模型互换
+                      </ActionButton>
+                    </div>
+                  )}
+
+                  {/* ---- 批量 Tab ---- */}
+                  {tab === "batch" && (
+                    <div className="flex flex-col gap-2">
+                      <DangerButton
+                        onClick={() => runConfirmed("runAll", onRunAllTasks)}
+                        confirming={confirmAction === "runAll"}
+                        confirmText="再次点击确认执行"
+                        icon={<Zap className="h-4 w-4" />}
+                      >
+                        立即执行所有定时任务
+                      </DangerButton>
+                      <DangerButton
+                        onClick={() => runConfirmed("clearConv", onClearAllConversations)}
+                        confirming={confirmAction === "clearConv"}
+                        confirmText="再次点击确认清空"
+                        icon={<Eraser className="h-4 w-4" />}
+                      >
+                        清空所有对话
+                      </DangerButton>
+                      <DangerButton
+                        onClick={() => runConfirmed("clearTasks", onClearAllTasks)}
+                        confirming={confirmAction === "clearTasks"}
+                        confirmText="再次点击确认清空"
+                        icon={<Clock className="h-4 w-4" />}
+                      >
+                        清空所有定时任务
+                      </DangerButton>
+                      <DangerButton
+                        onClick={() => runConfirmed("resetAll", onResetAll)}
+                        confirming={confirmAction === "resetAll"}
+                        confirmText="⚠️ 再次点击确认重置！"
+                        icon={<AlertTriangle className="h-4 w-4" />}
+                        variant="critical"
+                      >
+                        一键重置全部设置
+                      </DangerButton>
+                    </div>
+                  )}
+
+                  {/* ---- 快捷 Tab ---- */}
+                  {tab === "quick" && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <ActionButton onClick={onRelaunch} icon={<Power className="h-4 w-4" />}>
+                        重启应用
+                      </ActionButton>
+                      <ActionButton onClick={onOpenSettings} icon={<Shield className="h-4 w-4" />}>
+                        完整设置
+                      </ActionButton>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* 底部提示（主视图时） */}
+            {view === "main" && (
+              <p className="absolute bottom-3 left-0 right-0 text-center text-[10px] text-argent-400">
+                按 Esc 或点击空白处关闭
+              </p>
+            )}
+
+            {/* ============ 日志查看器子视图 ============ */}
+            {view === "logs" && (
+              <div className="flex w-full flex-col gap-3 pt-14">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-argent-300">
+                    共 {logs.length} 条 {hiddenConfig.debugMode ? "" : "（调试模式未开启，无新日志）"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => clearLogs()}
+                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-argent-200 hover:bg-white/10"
+                  >
+                    清空
+                  </button>
+                </div>
+                <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-white/10 bg-base-900/40 p-2 font-mono text-[11px] leading-relaxed">
+                  {logs.length === 0 ? (
+                    <div className="py-8 text-center text-argent-400">暂无日志</div>
+                  ) : (
+                    logs.slice().reverse().map((log, i) => (
+                      <div key={i} className="border-b border-white/5 px-1 py-1">
+                        <span className="text-argent-400">{formatTime(log.timestamp)}</span>
+                        <span className={cn("ml-2 font-semibold", levelColorClass(log.level))}>
+                          [{log.level.toUpperCase()}]
+                        </span>
+                        <span className="ml-2 text-argent-100 break-all">{log.message}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setView("main")}
+                  className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white hover:bg-white/10"
+                >
+                  返回
+                </button>
+              </div>
+            )}
+
+            {/* ============ System Prompt 子视图 ============ */}
+            {view === "prompt" && (
+              <div className="flex w-full flex-col gap-3 pt-14">
+                <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-white/10 bg-base-900/40 p-3 text-[11px] leading-relaxed text-argent-100 whitespace-pre-wrap">
+                  {SYSTEM_PROMPT}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setView("main")}
+                  className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white hover:bg-white/10"
+                >
+                  返回
+                </button>
+              </div>
+            )}
+
+            {/* ============ 存储占用子视图 ============ */}
+            {view === "storage" && (
+              <div className="w-full pt-14">
+                <StorageView onBack={() => setView("main")} />
+              </div>
+            )}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+// 存储占用子视图
+function StorageView({ onBack }: { onBack: () => void }) {
+  const [data, setData] = useState(() => estimateStorageUsage());
+
+  // 每次打开刷新一次
+  useEffect(() => {
+    setData(estimateStorageUsage());
+  }, []);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-argent-300">
+          总占用：<span className="font-semibold text-white">{formatBytes(data.totalBytes)}</span>
+        </span>
+        <button
+          type="button"
+          onClick={() => setData(estimateStorageUsage())}
+          className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-argent-200 hover:bg-white/10"
+        >
+          刷新
+        </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {data.items.map((item) => (
+          <div
+            key={item.key}
+            className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2"
+          >
+            <div className="flex flex-col">
+              <span className="text-xs text-white">{item.label}</span>
+              <span className="text-[10px] text-argent-400">{item.key}</span>
+            </div>
+            <span className={cn(
+              "text-xs font-mono",
+              item.bytes > 100 * 1024 ? "text-amber-300" : "text-argent-200"
+            )}>
+              {formatBytes(item.bytes)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={onBack}
+        className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white hover:bg-white/10"
+      >
+        返回
+      </button>
+    </div>
+  );
+}
+
+// 开关行
+function ToggleRow({
+  label, desc, checked, onChange,
+}: {
+  label: string;
+  desc: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="glass glass-edge rounded-2xl p-3.5">
+      <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium text-white">{label}</span>
+          <span className="text-[11px] text-argent-300">{desc}</span>
+        </div>
+        <MiniToggle checked={checked} onChange={onChange} />
+      </div>
+    </div>
+  );
+}
+
+// 数字调节行
+function NumberRow({
+  label, desc, value, min, max, onChange,
+}: {
+  label: string;
+  desc: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="glass glass-edge rounded-2xl p-3.5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium text-white">{label}</span>
+          <span className="text-[11px] text-argent-300">{desc}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onChange(Math.max(min, value - 1))}
+            className="h-7 w-7 rounded-lg border border-white/10 bg-white/5 text-white hover:bg-white/10"
+          >
+            −
+          </button>
+          <input
+            type="number"
+            min={min}
+            max={max}
+            value={value}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (Number.isFinite(v)) onChange(Math.max(min, Math.min(max, Math.round(v))));
+            }}
+            className="w-16 rounded-lg border border-white/10 bg-base-900/40 px-2 py-1 text-center text-sm text-white focus:border-titanium-500/50 focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => onChange(Math.min(max, value + 1))}
+            className="h-7 w-7 rounded-lg border border-white/10 bg-white/5 text-white hover:bg-white/10"
+          >
+            +
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 普通操作按钮
+function ActionButton({
+  onClick, icon, children,
+}: {
+  onClick: () => void;
+  icon: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-xs text-white transition-colors hover:bg-white/10"
+    >
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+// 危险操作按钮（带二次确认）
+function DangerButton({
+  onClick, confirming, confirmText, icon, children, variant = "normal",
+}: {
+  onClick: () => void;
+  confirming: boolean;
+  confirmText: string;
+  icon: ReactNode;
+  children: ReactNode;
+  variant?: "normal" | "critical";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex items-center justify-between gap-2 rounded-xl border px-4 py-2.5 text-sm transition-colors",
+        confirming
+          ? variant === "critical"
+            ? "border-crimson-500/50 bg-crimson-500/20 text-crimson-200 animate-pulse"
+            : "border-amber-500/50 bg-amber-500/20 text-amber-200"
+          : variant === "critical"
+            ? "border-crimson-500/30 bg-crimson-500/10 text-crimson-300 hover:bg-crimson-500/20"
+            : "border-white/10 bg-white/5 text-white hover:bg-white/10"
+      )}
+    >
+      <div className="flex items-center gap-2">
+        {icon}
+        {children}
+      </div>
+      {confirming && <span className="text-[11px] font-medium">{confirmText}</span>}
+    </button>
+  );
+}
+
+// 迷你玻璃开关（隐藏菜单专用，比 Settings 页更紧凑）
+function MiniToggle({
+  checked, onChange,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className={cn(
+        "relative h-5 w-9 rounded-full border transition-colors",
+        checked
+          ? "bg-gradient-to-br from-titanium-500 to-titanium-700 border-titanium-500/50"
+          : "bg-base-900/60 border-white/15"
+      )}
+    >
+      <motion.span
+        layout
+        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+        className="absolute rounded-full bg-white shadow"
+        style={{ height: 15, width: 15, top: 1.5, left: checked ? 18 : 1.5 }}
+      />
+    </button>
   );
 }
 

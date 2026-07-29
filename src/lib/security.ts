@@ -23,6 +23,8 @@ export interface SecurityConfig {
   /** 按工具名粒度的确认开关。true=需要确认，false=跳过确认。
    *  未列入此 map 的危险工具默认按 confirmDangerous 处理 */
   toolConfirmOverrides: Record<string, boolean>;
+  /** 用户活跃检测开关：开启时 GUI 工具在用户操作电脑时排队等待，关闭时始终自主执行 */
+  userActivityDetection: boolean;
 }
 
 // ============================================================
@@ -53,6 +55,7 @@ const DEFAULT_SECURITY: SecurityConfig = {
   confirmDangerous: true,
   dailyCostLimit: 10,
   toolConfirmOverrides: {},
+  userActivityDetection: true,
 };
 
 // ============================================================
@@ -71,6 +74,7 @@ export function loadSecurity(): SecurityConfig {
         ? parsed.dailyCostLimit
         : DEFAULT_SECURITY.dailyCostLimit,
       toolConfirmOverrides: parsed.toolConfirmOverrides ?? {},
+      userActivityDetection: parsed.userActivityDetection ?? DEFAULT_SECURITY.userActivityDetection,
     };
     // 验证 toolConfirmOverrides 的值类型，确保是 boolean
     for (const k of Object.keys(config.toolConfirmOverrides)) {

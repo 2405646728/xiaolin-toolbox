@@ -15,6 +15,7 @@ import {
 } from "./tools";
 import { loadSecurity, shouldConfirmTool, checkShellCommand, checkShellArgs, checkDailyCostLimit } from "./security";
 import { getUsageToday } from "./usage";
+import { loadHiddenConfig } from "./hiddenConfig";
 
 // ============================================================
 // GUI 工具集合：会干扰用户操作的 GUI 自动化工具
@@ -32,8 +33,9 @@ const GUI_TOOLS = new Set([
   "power_sleep", "power_restart", "power_shutdown",
 ]);
 
-/** 用户空闲阈值（秒）：超过此时间无输入视为空闲，AI 可自主操控 */
-const IDLE_THRESHOLD_SECONDS = 120;
+/** 用户空闲阈值（秒）默认值：超过此时间无输入视为空闲，AI 可自主操控
+ * 实际值从 hiddenConfig 动态读取（隐藏菜单可调） */
+const DEFAULT_IDLE_THRESHOLD_SECONDS = 120;
 
 /** 等待轮询间隔（毫秒） */
 const WAIT_POLL_INTERVAL_MS = 10_000;
@@ -65,23 +67,29 @@ async function getUserIdleSeconds(): Promise<number> {
   }
 }
 
-/** waitForUserIdle 最大等待时间（毫秒），超过后强制执行 */
-const WAIT_MAX_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟
+/** waitForUserIdle 最大等待时间（毫秒）默认值，超过后强制执行
+ * 实际值从 hiddenConfig 动态读取（隐藏菜单可调） */
+const DEFAULT_WAIT_MAX_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟
 
 /**
  * 等待用户空闲（空闲时间达到阈值）
  * 每 WAIT_POLL_INTERVAL_MS 轮询一次，期间检查中断信号
- * 超过 WAIT_MAX_TIMEOUT_MS 后强制返回 true，避免永久阻塞
+ * 超过 guiWaitTimeoutMs 后强制返回 true，避免永久阻塞
  * @returns true=已空闲/超时强制执行，false=被中断
  */
 async function waitForUserIdle(signal?: AbortSignal): Promise<boolean> {
+  // 动态读取隐藏配置
+  const hidden = loadHiddenConfig();
+  const idleThreshold = hidden.idleThresholdSeconds || DEFAULT_IDLE_THRESHOLD_SECONDS;
+  const waitTimeout = hidden.guiWaitTimeoutMs || DEFAULT_WAIT_MAX_TIMEOUT_MS;
+
   const start = Date.now();
   while (true) {
     if (signal?.aborted) return false;
     // 超时强制执行，避免永久阻塞
-    if (Date.now() - start >= WAIT_MAX_TIMEOUT_MS) return true;
+    if (Date.now() - start >= waitTimeout) return true;
     const idle = await getUserIdleSeconds();
-    if (idle >= IDLE_THRESHOLD_SECONDS) return true;
+    if (idle >= idleThreshold) return true;
     // 等待下一轮询，确保 abort 时能立即唤醒并清理监听器
     await new Promise<void>((resolve) => {
       let resolved = false;
@@ -196,6 +204,12 @@ export const SYSTEM_PROMPT = `你是小林 AI，一个能自主操控电脑的�
 5. **错误重试**：如果点击没生效，重新截屏观察，调整坐标重试
 6. **用户拒绝**：如果用户拒绝了某个危险操作，不要重复请求，告知用户并询问替代方案
 7. **任务完成**：任务完成后用简洁的中文总结结果，不再调用工具
+8. **自主解决问题**：工具执行失败时，系统会自动截图分析当前屏幕状态。你应该根据截图描述和错误信息，主动尝试用鼠标/键盘操作解决问题，而不是直接把错误抛给用户。例如：
+   - 如果应用没有打开，尝试用 mouse_click 点击任务栏/开始菜单图标
+   - 如果弹出了对话框，点击确认或关闭按钮
+   - 如果输入框没获得焦点，先 mouse_click 点击输入框再 keyboard_type
+   - 如果快捷键没生效，改用鼠标点击菜单完成同样操作
+   - 最多重试 3 次不同策略，全部失败后才告知用户
 
 ## 网页操作场景（重要）
 **指令识别**：以下表达都表示「在网站内搜索」，不要用 search_web 工具：
@@ -312,10 +326,15 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     config,
     messages,
     conversationId,
-    maxSteps = 20,
     signal,
     callbacks = {},
   } = options;
+
+  // 动态读取隐藏配置的参数（隐藏菜单可调）
+  const hiddenCfg = loadHiddenConfig();
+  const maxSteps = hiddenCfg.maxSteps || 20;
+  const idleThreshold = hiddenCfg.idleThresholdSeconds || DEFAULT_IDLE_THRESHOLD_SECONDS;
+  const maxAutoScreenshotFailures = hiddenCfg.autoScreenshotMaxFailures;
 
   const steps: AgentStep[] = [];
   const totalUsage = {
@@ -342,6 +361,24 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const workingMessages: ChatMessage[] = [...messages];
 
   let finalText = "";
+
+  // ---- 任务开始时检测一次用户空闲状态 ----
+  // 开关关闭时（userActivityDetection=false）始终自主执行，不检测用户活跃
+  // 开关开启时：用户空闲→自主执行，用户活跃→GUI 工具排队等待
+  let autonomousMode = true;
+  const secConfig = loadSecurity();
+  if (secConfig.userActivityDetection) {
+    const initialIdleSec = await getUserIdleSeconds();
+    autonomousMode = initialIdleSec >= idleThreshold;
+    if (autonomousMode) {
+      console.log(`[Agent] 自主执行模式：用户空闲 ${Math.floor(initialIdleSec)}秒（阈值 ${idleThreshold}s）`);
+    }
+  } else {
+    console.log(`[Agent] 自主执行模式：用户活跃检测已关闭`);
+  }
+
+  // 连续失败计数器：同一工具连续失败超过阈值后不再自动截图（节省 token）
+  const failureCount = new Map<string, number>();
 
   try {
     for (let step = 1; step <= maxSteps; step++) {
@@ -510,9 +547,10 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
           }
 
           // GUI 工具：用户活跃时排队等待，避免抢占用户操作
-          if (GUI_TOOLS.has(toolName)) {
-            let idleSec = await getUserIdleSeconds();
-            if (idleSec < IDLE_THRESHOLD_SECONDS) {
+          // 自主模式下（任务开始时用户已空闲）跳过等待，直接执行
+          if (GUI_TOOLS.has(toolName) && !autonomousMode) {
+            const idleSec = await getUserIdleSeconds();
+            if (idleSec < idleThreshold) {
               // 推送等待步骤到 UI
               const waitingStep: AgentStep = {
                 index: step,
@@ -666,12 +704,56 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
             });
           }
         } else {
-          // 普通工具：直接 JSON.stringify(result)
-          workingMessages.push({
-            role: "tool",
-            content: JSON.stringify(result),
-            tool_call_id: toolCallId,
-          });
+          // 普通工具：检查是否执行失败
+          // 失败时自动截图 + 视觉分析，让 AI 能"看到"屏幕并用鼠标解决问题
+          if (!result.success && !isVisionTool(toolName) && !result.error?.includes("任务已中断") && !signal?.aborted) {
+            // 连续失败保护：同一工具连续失败超过阈值后不再自动截图
+            const failNum = (failureCount.get(toolName) ?? 0) + 1;
+            failureCount.set(toolName, failNum);
+
+            if (failNum <= maxAutoScreenshotFailures) {
+              // 自动截图分析错误上下文
+              const errorScreenshot = await autoScreenshotOnError(config, signal, conversationId);
+              if (errorScreenshot) {
+                // 截图成功，把截图附在 toolResultStep 上供 UI 显示
+                toolResultStep.screenshot = errorScreenshot.base64;
+                safeCall(callbacks.onScreenshot, errorScreenshot.base64);
+
+                // 构造包含错误信息+截图描述的 tool 消息
+                const errorMsg = result.error || "工具执行失败";
+                workingMessages.push({
+                  role: "tool",
+                  content: `执行失败：${errorMsg}\n\n【系统已自动截图分析】当前屏幕内容描述：${errorScreenshot.description}\n\n请根据屏幕内容和错误信息，判断如何用鼠标/键盘操作解决问题。例如：如果窗口未打开，尝试用鼠标点击任务栏图标；如果弹出了对话框，点击确认按钮。`,
+                  tool_call_id: toolCallId,
+                });
+              } else {
+                // 截图失败：只返回错误信息
+                workingMessages.push({
+                  role: "tool",
+                  content: JSON.stringify(result),
+                  tool_call_id: toolCallId,
+                });
+              }
+            } else {
+              // 超过连续失败阈值：只返回错误信息，不再截图
+              workingMessages.push({
+                role: "tool",
+                content: JSON.stringify(result) + `\n\n（该工具已连续失败 ${failNum} 次，不再自动截图分析。请尝试换一种方法或告知用户。）`,
+                tool_call_id: toolCallId,
+              });
+            }
+          } else {
+            // 成功的工具：重置失败计数器
+            if (result.success) {
+              failureCount.delete(toolName);
+            }
+            // 直接 JSON.stringify(result)
+            workingMessages.push({
+              role: "tool",
+              content: JSON.stringify(result),
+              tool_call_id: toolCallId,
+            });
+          }
         }
       } // end for each tool_call
 
@@ -696,7 +778,99 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 }
 
 // ============================================================
-// 5. 内部工具：推送错误步骤
+// 5. 内部工具：自动截图分析错误上下文
+// ============================================================
+
+/**
+ * 工具执行失败时自动截图 + 视觉模型分析
+ * 让 AI 能"看到"当前屏幕状态，从而用鼠标/键盘操作解决问题
+ * @returns { base64, description } 或 null（截图失败）
+ */
+async function autoScreenshotOnError(
+  config: LLMConfig,
+  signal: AbortSignal | undefined,
+  conversationId?: string
+): Promise<{ base64: string; description: string } | null> {
+  try {
+    // 1. 截图
+    const screenshotResult = await executeTool("screenshot", {}, {
+      conversationId,
+      requiresConfirmation: () => false, // 自动截图不需要确认
+    });
+    const base64 = extractScreenshot(screenshotResult);
+    if (!base64) return null;
+
+    // 2. 视觉模型分析截图
+    // 判断当前文本模型是否支持视觉
+    const textModelSupportsVision = config.visionModel && config.model === config.visionModel;
+
+    if (textModelSupportsVision) {
+      // 文本模型本身支持视觉：直接返回 base64，描述由主循环的多模态消息处理
+      // 但这里我们需要文字描述来构造 tool 消息，所以仍然调用 visionChat
+      try {
+        const visionResult = await visionChat({
+          config,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "工具执行出错了。请分析这张屏幕截图，重点说明：1) 当前屏幕上有什么窗口/对话框/错误提示 2) 可交互元素（按钮、输入框、菜单）的位置（用坐标描述）3) 可能导致错误的原因和解决建议。200字以内。",
+                },
+                {
+                  type: "image_url",
+                  image_url: { url: `data:image/png;base64,${base64}` },
+                },
+              ],
+            },
+          ],
+          signal,
+          conversationId,
+        });
+        return { base64, description: visionResult.content || "（视觉模型未返回描述）" };
+      } catch {
+        return { base64, description: "（视觉模型分析失败，但截图已保存，AI 可参考屏幕内容）" };
+      }
+    } else if (config.visionModel) {
+      // 独立视觉模型
+      try {
+        const visionResult = await visionChat({
+          config,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "工具执行出错了。请分析这张屏幕截图，重点说明：1) 当前屏幕上有什么窗口/对话框/错误提示 2) 可交互元素（按钮、输入框、菜单）的位置（用坐标描述）3) 可能导致错误的原因和解决建议。200字以内。",
+                },
+                {
+                  type: "image_url",
+                  image_url: { url: `data:image/png;base64,${base64}` },
+                },
+              ],
+            },
+          ],
+          signal,
+          conversationId,
+        });
+        return { base64, description: visionResult.content || "（视觉模型未返回描述）" };
+      } catch {
+        return { base64, description: "（视觉模型分析失败，但截图已保存，AI 可参考屏幕内容）" };
+      }
+    } else {
+      // 未配置视觉模型：返回截图但无描述
+      return { base64, description: "（未配置视觉模型，无法分析截图内容，但截图已保存）" };
+    }
+  } catch {
+    // 截图本身失败
+    return null;
+  }
+}
+
+// ============================================================
+// 6. 内部工具：推送错误步骤
 // ============================================================
 
 /** 构造并推送一个 error 步骤，同时触发 onError / onStep 回调 */

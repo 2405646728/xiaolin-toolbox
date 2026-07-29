@@ -653,6 +653,20 @@ function SecurityTab({
         </div>
       </div>
 
+      {/* 用户活跃检测开关 */}
+      <div className="glass glass-edge rounded-2xl p-5 shadow-xl">
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-1">
+            <span className="text-sm font-medium text-white">用户活跃检测</span>
+            <span className="text-xs text-argent-300">
+              开启时检测鼠标键盘活动，用户操作电脑时 GUI 任务排队等待；关闭时 AI 始终自主执行
+            </span>
+          </div>
+          <GlassToggle checked={security.userActivityDetection}
+            onChange={(v) => setSecurity((s) => ({ ...s, userActivityDetection: v }))} />
+        </div>
+      </div>
+
       {/* 按工具粒度确认开关 */}
       <div className="glass glass-edge rounded-2xl p-5 shadow-xl">
         <div className="flex items-center justify-between">
