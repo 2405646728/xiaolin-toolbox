@@ -97,16 +97,6 @@ ollama serve
 
 Recommended models: `qwen2.5:7b-instruct-q4_K_M` (text) + `llava:7b` (vision)
 
-## Hidden Menu
-
-Press `↑ ↑ ↓ ↓ ← → ← →` (Konami Code) on the main interface to open the hidden control panel, which includes:
-
-- **Quick Toggles**: User activity detection, dangerous operation confirmation, debug mode, force offline mode
-- **Dynamic Parameters**: Agent max steps, idle threshold, context message count, GUI wait timeout, screenshot retry count, daily cost limit
-- **Diagnostics**: Log viewer, System Prompt viewer, storage usage estimator, text/vision model swap
-- **Batch Operations**: Run all scheduled tasks, clear all conversations, clear all scheduled tasks, reset all settings
-- **Quick Actions**: Restart app, open full settings
-
 ## Auto Update
 
 The app has a built-in Tauri Updater. Go to "Settings → About → Check for Updates" to automatically download and install the latest version.
