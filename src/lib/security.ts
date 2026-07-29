@@ -31,12 +31,23 @@ export interface SecurityConfig {
 
 const SECURITY_KEY = "xiaolin-ai-security";
 
-/** Shell 命令黑名单（不可配置，硬编码） */
+/** Shell 命令黑名单（不可配置，硬编码）
+ * 与后端 lib.rs BLOCKED 列表保持一致 */
 export const COMMAND_BLOCKLIST = [
   "format", "del", "rd", "rmdir", "mkfs", "dd",
   "diskpart", "diskmgmt", "reg delete",
   "shutdown", "taskkill /f /im explorer",
+  "remove-item", "rm", "cipher /w", "bcdedit",
+  "net user", "sc delete", "net stop", "takeown", "icacls",
 ];
+
+/** 预编译的正则数组，避免每次调用 checkShellCommand 都重新编译 */
+const BLOCKED_PATTERNS: ReadonlyArray<{ word: string; regex: RegExp }> = COMMAND_BLOCKLIST.map(
+  (word) => ({
+    word,
+    regex: new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
+  })
+);
 
 const DEFAULT_SECURITY: SecurityConfig = {
   confirmDangerous: true,
@@ -54,11 +65,20 @@ export function loadSecurity(): SecurityConfig {
     if (!raw) return { ...DEFAULT_SECURITY };
     const parsed = JSON.parse(raw) as Partial<SecurityConfig>;
     // 合并默认值，保证新字段存在
-    return {
+    const config: SecurityConfig = {
       confirmDangerous: parsed.confirmDangerous ?? DEFAULT_SECURITY.confirmDangerous,
-      dailyCostLimit: parsed.dailyCostLimit ?? DEFAULT_SECURITY.dailyCostLimit,
+      dailyCostLimit: typeof parsed.dailyCostLimit === "number" && parsed.dailyCostLimit >= 0
+        ? parsed.dailyCostLimit
+        : DEFAULT_SECURITY.dailyCostLimit,
       toolConfirmOverrides: parsed.toolConfirmOverrides ?? {},
     };
+    // 验证 toolConfirmOverrides 的值类型，确保是 boolean
+    for (const k of Object.keys(config.toolConfirmOverrides)) {
+      if (typeof config.toolConfirmOverrides[k] !== "boolean") {
+        delete config.toolConfirmOverrides[k];
+      }
+    }
+    return config;
   } catch {
     return { ...DEFAULT_SECURITY };
   }
@@ -103,12 +123,37 @@ export function shouldConfirmTool(toolName: string, config: SecurityConfig): boo
  */
 export function checkShellCommand(command: string): string | null {
   const lower = command.toLowerCase();
-  for (const blocked of COMMAND_BLOCKLIST) {
-    // 用单词边界匹配，避免误伤（如 "delete" 不会匹配 "deletefile"）
-    const pattern = new RegExp(`\\b${blocked.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-    if (pattern.test(lower)) {
-      return `命令包含黑名单关键词「${blocked}」，已拦截`;
+  for (const { word, regex } of BLOCKED_PATTERNS) {
+    if (regex.test(lower)) {
+      return `命令包含黑名单关键词「${word}」，已拦截`;
     }
+  }
+  return null;
+}
+
+/**
+ * 检查 args 数组是否包含黑名单关键词（防止 cmd /c "format C:" 绕过）
+ * @returns 拦截原因，null 表示通过
+ */
+export function checkShellArgs(args: string[]): string | null {
+  if (!args || args.length === 0) return null;
+  const joined = args.join(" ").toLowerCase();
+  for (const { word, regex } of BLOCKED_PATTERNS) {
+    if (regex.test(joined)) {
+      return `参数包含黑名单关键词「${word}」，已拦截`;
+    }
+  }
+  return null;
+}
+
+/**
+ * 检查今日累计费用是否超过每日上限
+ * @returns 超限原因，null 表示未超限或未配置上限
+ */
+export function checkDailyCostLimit(todayCost: number, config: SecurityConfig): string | null {
+  if (config.dailyCostLimit <= 0) return null;
+  if (todayCost >= config.dailyCostLimit) {
+    return `今日累计费用 ¥${todayCost.toFixed(2)} 已超过每日上限 ¥${config.dailyCostLimit}，已拦截任务执行`;
   }
   return null;
 }

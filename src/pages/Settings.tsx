@@ -921,6 +921,19 @@ function AboutTab() {
     update: any; // Tauri updater Update 实例
   } | null>(null);
   const [downloading, setDownloading] = useState(false);
+  // 下载进度（0-100），null 表示未在下载或插件不支持回调
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  // 应用版本号（从 Tauri 配置动态读取，避免硬编码）
+  const [appVersion, setAppVersion] = useState<string>("");
+
+  // 初始化：获取应用版本号
+  useEffect(() => {
+    if (!isTauri) return;
+    import("@tauri-apps/api/app")
+      .then((mod) => mod.getVersion())
+      .then((v) => setAppVersion(v))
+      .catch(() => setAppVersion(""));
+  }, []);
 
   // 检查更新：通过 Tauri updater 插件查询最新版本（不自动下载）
   const handleCheckUpdate = async () => {
@@ -964,13 +977,33 @@ function AboutTab() {
     }
   };
 
-  // 用户确认后再下载并安装
+  // 用户确认后再下载并安装，支持进度回调
+  // DownloadEvent 结构（@tauri-apps/plugin-updater v2.10.1）：
+  //   Started  → { event: 'Started',  data: { contentLength?: number } }  // 总大小
+  //   Progress → { event: 'Progress', data: { chunkLength: number } }     // 本次块大小
+  //   Finished → { event: 'Finished' }
   const handleConfirmInstall = async () => {
     if (!pendingUpdate) return;
     setDownloading(true);
+    setDownloadProgress(0);
     try {
       const processApi = await loadProcessModule();
-      await pendingUpdate.update.downloadAndInstall();
+      // 用闭包变量保存总大小和已下载大小（回调参数无法直接计算百分比）
+      let totalBytes = 0;
+      let downloadedBytes = 0;
+      await pendingUpdate.update.downloadAndInstall((event: any) => {
+        if (event?.event === "Started" && typeof event.data?.contentLength === "number") {
+          totalBytes = event.data.contentLength;
+        } else if (event?.event === "Progress" && typeof event.data?.chunkLength === "number") {
+          downloadedBytes += event.data.chunkLength;
+          if (totalBytes > 0) {
+            const pct = Math.min(100, Math.round((downloadedBytes / totalBytes) * 100));
+            setDownloadProgress(pct);
+          }
+        } else if (event?.event === "Finished") {
+          setDownloadProgress(100);
+        }
+      });
       // 安装完成后重启应用
       await processApi.relaunch();
     } catch (e) {
@@ -978,6 +1011,7 @@ function AboutTab() {
       setUpdateInfo({ available: false, message: msg });
     } finally {
       setDownloading(false);
+      setDownloadProgress(null);
     }
   };
 
@@ -1004,7 +1038,7 @@ function AboutTab() {
             <h2 className="text-lg font-semibold text-white">小林 AI</h2>
             <div className="mt-0.5 flex items-center gap-2">
               <span className="rounded-full bg-titanium-500/15 border border-titanium-500/30 px-2 py-0.5 text-[11px] text-titanium-300">
-                v1.1.4
+                {appVersion ? `v${appVersion}` : "版本获取中..."}
               </span>
               <span className="text-xs text-argent-400">桌面 AI 助手</span>
             </div>
@@ -1065,7 +1099,11 @@ function AboutTab() {
                   disabled={downloading}
                 >
                   {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                  <span>{downloading ? "下载安装中..." : "立即下载安装"}</span>
+                  <span>
+                    {downloading
+                      ? (downloadProgress !== null ? `下载中 ${downloadProgress}%` : "下载安装中...")
+                      : "立即下载安装"}
+                  </span>
                 </GlassButton>
                 <GlassButton
                   variant="ghost"
@@ -1076,6 +1114,17 @@ function AboutTab() {
                   <span>暂不更新</span>
                 </GlassButton>
               </div>
+              {/* 下载进度条 */}
+              {downloading && downloadProgress !== null && (
+                <div className="mt-2 h-1.5 w-full rounded-full bg-base-900/60 overflow-hidden">
+                  <motion.div
+                    className="h-full bg-gradient-to-r from-titanium-500 to-titanium-400"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${downloadProgress}%` }}
+                    transition={{ duration: 0.3 }}
+                  />
+                </div>
+              )}
               {downloading && (
                 <p className="mt-2 text-[11px] text-argent-400">
                   下载安装期间请勿关闭应用，安装完成后将自动重启。

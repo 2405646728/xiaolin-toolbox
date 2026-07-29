@@ -317,23 +317,47 @@ function ErrorCard({ step }: { step: AgentStep }) {
 
 // ============================================================
 // 等待卡片：琥珀色，表示任务排队等待用户空闲
+// 显示工具名和等待原因，最多等待 10 分钟后自动执行
 // ============================================================
 
 function WaitingCard({ step }: { step: AgentStep }) {
+  const toolName = step.toolCall?.name;
+  const toolLabel = toolName ? (TOOL_LABELS[toolName] ?? toolName) : null;
+  // 判断是否为"恢复执行"消息（非等待状态）
+  const isResumed = step.content?.includes("用户已空闲");
   return (
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: "spring", stiffness: 300, damping: 24 }}
-      className="glass-tile glass-tile-edge rounded-xl shadow-lg p-3 border border-amber-500/40"
+      className={cn(
+        "glass-tile glass-tile-edge rounded-xl shadow-lg p-3 border",
+        isResumed ? "border-emerald-500/40" : "border-amber-500/40"
+      )}
     >
       <div className="flex items-center gap-2">
-        <Loader2 size={15} className="animate-spin text-amber-400" />
-        <span className="text-xs font-medium text-amber-400">排队等待</span>
+        {isResumed ? (
+          <CheckCircle2 size={15} className="text-emerald-400" />
+        ) : (
+          <Loader2 size={15} className="animate-spin text-amber-400" />
+        )}
+        <span className={cn("text-xs font-medium", isResumed ? "text-emerald-400" : "text-amber-400")}>
+          {isResumed ? "已恢复执行" : "排队等待"}
+        </span>
+        {toolLabel && !isResumed && (
+          <span className="ml-auto text-[10px] text-argent-400 font-mono">
+            待执行: {toolLabel}
+          </span>
+        )}
       </div>
       <div className="mt-1.5 text-xs text-argent-200 break-words">
         {step.content ?? "等待用户空闲…"}
       </div>
+      {!isResumed && (
+        <div className="mt-2 text-[10px] text-argent-400">
+          AI 将在您停止操作 2 分钟后自动执行，最多等待 10 分钟
+        </div>
+      )}
     </motion.div>
   );
 }

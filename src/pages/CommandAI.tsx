@@ -62,6 +62,7 @@ interface UIMessage {
   executed?: boolean;            // 离线模式是否真实执行
   timestamp: number;
   attachments?: ImageAttachment[]; // 用户发送的图片附件
+  warning?: string;              // 警告提示（如视觉模型失败）
 }
 
 const QUICK_COMMANDS = ["截屏看看", "打开记事本", "搜索周杰伦", "当前时间", "获取系统状态"];
@@ -134,23 +135,35 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
   // 文件选择 input（隐藏，由按钮触发）
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 添加图片文件到待发送附件
+  // 添加图片文件到待发送附件（限制最多 5 张，单张 10MB）
   const addImageFiles = useCallback(async (files: FileList | File[]) => {
+    const MAX_IMAGES = 5;
+    const MAX_SIZE = 10 * 1024 * 1024; // 10MB
     const imageFiles = Array.from(files).filter((f) =>
       f.type.startsWith("image/")
     );
     if (imageFiles.length === 0) return;
+    // 过滤超大图片
+    const valid = imageFiles.filter((f) => f.size <= MAX_SIZE);
+    if (valid.length < imageFiles.length) {
+      console.warn(`${imageFiles.length - valid.length} 张图片超过 10MB 已忽略`);
+    }
     try {
       const dataUrls = await Promise.all(
-        imageFiles.map((f) => fileToDataUrl(f).then((url) => ({ url, name: f.name })))
+        valid.map((f) => fileToDataUrl(f).then((url) => ({ url, name: f.name })))
       );
-      setPendingAttachments((prev) => [...prev, ...dataUrls]);
-    } catch {
-      // 静默失败
+      setPendingAttachments((prev) => {
+        const merged = [...prev, ...dataUrls];
+        // 超过上限时只保留最后 MAX_IMAGES 张
+        return merged.length > MAX_IMAGES ? merged.slice(-MAX_IMAGES) : merged;
+      });
+    } catch (e) {
+      console.error("图片加载失败:", e);
     }
   }, []);
 
   // 粘贴事件处理：提取剪贴板中的图片
+  // 注意：同时有文本和图片时只处理图片（文本需用户主动粘贴到输入框）
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
       const items = e.clipboardData?.items;
@@ -330,16 +343,19 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
       const controller = new AbortController();
       abortRef.current = controller;
 
-      // 构造上下文消息：system + 最近 10 条历史 + 当前用户消息
+      // 构造上下文消息：system + 最近 10 条历史（含用户和 AI 回复，保持多轮上下文）
+      // UIMessage.role 为 "user" | "ai"，映射到 LLM 的 "user" | "assistant"
       const historyMessages: LLMChatMessage[] = [
         { role: "system", content: SYSTEM_PROMPT },
       ];
       const recent = messagesRef.current
-        .filter((m) => m.id !== aiMsgId && m.text && m.role === "user")
+        .filter((m) => m.id !== aiMsgId && m.text && (m.role === "user" || m.role === "ai"))
         .slice(-10);
       for (const m of recent) {
+        // 跳过正在运行或错误的消息，避免脏数据污染上下文
+        if (m.isRunning) continue;
         historyMessages.push({
-          role: "user",
+          role: m.role === "ai" ? "assistant" : "user",
           content: m.text || "",
         });
       }
@@ -377,9 +393,18 @@ export default function CommandAI({ onOpenSettings }: CommandAIProps) {
             "【图片内容描述】",
             imageDesc,
           ].join("\n");
-        } catch {
-          // 视觉模型失败时，降级为纯文本提示
-          finalUserText = userText || "（用户发送了图片，但视觉模型解析失败）";
+        } catch (err) {
+          // 视觉模型失败时，降级为纯文本提示，并在消息中标注图片未被识别
+          console.warn("视觉模型解析失败，降级为纯文本:", err);
+          finalUserText = [
+            userText || "请分析这张图片。",
+            "",
+            "【系统提示】视觉模型解析图片失败，AI 无法识别图片内容，请基于用户文本回答。",
+          ].join("\n");
+          // 在 UI 上提示用户
+          updateMessage(aiMsgId, {
+            warning: "视觉模型解析图片失败，AI 将仅基于文本回答",
+          });
         }
       }
       historyMessages.push({ role: "user", content: finalUserText });

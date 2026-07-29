@@ -833,24 +833,40 @@ export async function executeTool(
     delete args.enable;
   }
 
-  // write_file：未指定 path 或纯文件名时，默认保存到「桌面/小林AI产出/」
+  // write_file：未指定 path、纯文件名、或相对路径时，默认保存到「桌面/小林AI产出/」
   if (name === "write_file") {
     const rawPath = typeof args.path === "string" ? args.path.trim() : "";
-    // 判断是否为纯文件名（无盘符、无斜杠）或为空
-    const isBareName = !rawPath || (
-      !rawPath.includes(":") && !rawPath.includes("/") && !rawPath.includes("\\")
-    );
-    if (isBareName) {
+    // 判断是否需要重定向到默认目录：
+    // - 空路径
+    // - 纯文件名（无盘符、无斜杠）
+    // - 相对路径（含斜杠但无盘符，如 subdir/file.txt）
+    const isAbsolute = /^[a-zA-Z]:[\\/]/.test(rawPath) || rawPath.startsWith("\\\\");
+    const needsRedirect = !rawPath || !isAbsolute;
+    if (needsRedirect) {
       const desktop = await invoke("get_desktop_path", {});
       if (typeof desktop === "string") {
         const dir = `${desktop}\\小林AI产出`;
-        // 确保目录存在
+        // 确保目录存在，PowerShell 路径转义单引号
+        const escapedDir = dir.replace(/'/g, "''");
         try {
-          await invoke("run_shell", { command: `if (!(Test-Path '${dir}')) { New-Item -ItemType Directory -Path '${dir}' -Force | Out-Null }` });
+          await invoke("run_shell", {
+            command: `if (!(Test-Path '${escapedDir}')) { New-Item -ItemType Directory -Path '${escapedDir}' -Force | Out-Null }`,
+          });
         } catch {
           // 目录创建失败不阻断，write_file 会报错
         }
-        const fileName = rawPath || `输出_${Date.now()}.txt`;
+        // 智能推断扩展名：无文件名时根据 content 推断
+        let fileName = rawPath || "";
+        if (!fileName) {
+          const content = typeof args.content === "string" ? args.content : "";
+          if (content.trim().startsWith("{") || content.trim().startsWith("[")) {
+            fileName = `输出_${Date.now()}.json`;
+          } else if (content.includes("# ") || content.includes("## ")) {
+            fileName = `输出_${Date.now()}.md`;
+          } else {
+            fileName = `输出_${Date.now()}.txt`;
+          }
+        }
         args.path = `${dir}\\${fileName}`;
       }
     }

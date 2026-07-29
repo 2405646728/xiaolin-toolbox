@@ -13,7 +13,8 @@ import {
   TOOL_DEFINITIONS,
   type ToolExecutionResult,
 } from "./tools";
-import { loadSecurity, shouldConfirmTool, checkShellCommand } from "./security";
+import { loadSecurity, shouldConfirmTool, checkShellCommand, checkShellArgs, checkDailyCostLimit } from "./security";
+import { getUsageToday } from "./usage";
 
 // ============================================================
 // GUI 工具集合：会干扰用户操作的 GUI 自动化工具
@@ -48,37 +49,52 @@ async function getInvoke(): Promise<((cmd: string, args?: Record<string, unknown
   }
 }
 
-/** 查询用户空闲秒数（非 Tauri 环境返回 0，视为始终空闲） */
+/**
+ * 查询用户空闲秒数
+ * - 非 Tauri 环境返回 Infinity（视为始终空闲，不阻塞）
+ * - invoke 失败返回 Infinity（容错：不阻塞 GUI 工具）
+ */
 async function getUserIdleSeconds(): Promise<number> {
   const invoke = await getInvoke();
-  if (!invoke) return Infinity; // 浏览器环境视为始终空闲
+  if (!invoke) return Infinity;
   try {
     const sec = await invoke("get_user_idle_seconds", {});
-    return typeof sec === "number" ? sec : 0;
+    return typeof sec === "number" ? sec : Infinity;
   } catch {
-    return 0;
+    return Infinity;
   }
 }
+
+/** waitForUserIdle 最大等待时间（毫秒），超过后强制执行 */
+const WAIT_MAX_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟
 
 /**
  * 等待用户空闲（空闲时间达到阈值）
  * 每 WAIT_POLL_INTERVAL_MS 轮询一次，期间检查中断信号
- * @returns true=已空闲可以继续，false=被中断
+ * 超过 WAIT_MAX_TIMEOUT_MS 后强制返回 true，避免永久阻塞
+ * @returns true=已空闲/超时强制执行，false=被中断
  */
 async function waitForUserIdle(signal?: AbortSignal): Promise<boolean> {
+  const start = Date.now();
   while (true) {
     if (signal?.aborted) return false;
+    // 超时强制执行，避免永久阻塞
+    if (Date.now() - start >= WAIT_MAX_TIMEOUT_MS) return true;
     const idle = await getUserIdleSeconds();
     if (idle >= IDLE_THRESHOLD_SECONDS) return true;
-    // 等待下一轮询
+    // 等待下一轮询，确保 abort 时能立即唤醒并清理监听器
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, WAIT_POLL_INTERVAL_MS);
-      // 支持中断提前唤醒
+      let resolved = false;
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      };
+      const timer = setTimeout(() => { finish(); resolve(); }, WAIT_POLL_INTERVAL_MS);
+      let onAbort: (() => void) | null = null;
       if (signal) {
-        const onAbort = () => {
-          clearTimeout(timer);
-          resolve();
-        };
+        onAbort = () => { finish(); resolve(); };
         signal.addEventListener("abort", onAbort, { once: true });
       }
     });
@@ -308,6 +324,20 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     totalTokens: 0,
   };
 
+  // ---- 每日费用上限检查 ----
+  // 任务开始前检查今日累计费用，超限则直接拒绝执行
+  try {
+    const sec = loadSecurity();
+    const todayCost = getUsageToday().cost;
+    const blockReason = checkDailyCostLimit(todayCost, sec);
+    if (blockReason) {
+      pushErrorStep(steps, 1, blockReason, callbacks);
+      return { steps, finalText: "", totalUsage };
+    }
+  } catch {
+    // 用量查询失败不阻塞任务
+  }
+
   // 工作消息列表（副本），循环中持续追加 assistant / tool 消息
   const workingMessages: ChatMessage[] = [...messages];
 
@@ -450,8 +480,13 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         let result: ToolExecutionResult;
         try {
           // run_shell 黑名单检查（在确认前拦截，避免危险命令弹出确认框）
+          // 同时检查 command 和 args，防止通过 cmd /c "format C:" 绕过
           if (toolName === "run_shell" && typeof toolArgs.command === "string") {
-            const blocked = checkShellCommand(toolArgs.command);
+            const blockedCmd = checkShellCommand(toolArgs.command);
+            const blockedArgs = Array.isArray(toolArgs.args)
+              ? checkShellArgs(toolArgs.args as string[])
+              : null;
+            const blocked = blockedCmd ?? blockedArgs;
             if (blocked) {
               result = { success: false, error: blocked };
               // 跳过执行，直接进入结果处理

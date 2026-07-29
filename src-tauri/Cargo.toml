@@ -1,6 +1,6 @@
 [package]
 name = "xiaolin-ai"
-version = "1.1.6"
+version = "1.1.7"
 description = "小林 AI - 对话型 AI 助手"
 authors = ["you"]
 edition = "2021"
@@ -26,6 +26,7 @@ xcap = "0.0.14"
 arboard = "3"
 base64 = "0.22"
 image = "0.25"
+regex-lite = "0.1"
 
 # Windows 平台特定依赖（窗口管理使用 Win32 API）
 [target.'cfg(windows)'.dependencies]

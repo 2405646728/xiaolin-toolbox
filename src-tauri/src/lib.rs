@@ -54,6 +54,9 @@ struct BatteryInfo {
     model: String,
     cycles: u32,
     health: u32,
+    /// 电池剩余电量百分比（0-100），0 表示无电池或未检测到
+    #[serde(default)]
+    level: u32,
 }
 
 #[derive(Serialize)]
@@ -216,7 +219,13 @@ fn get_hardware_info() -> HardwarePayload {
         .unwrap_or_else(|| "未知".into());
     let cpu_frequency = cpus.first().map(|c| c.frequency()).unwrap_or(0);
     let cpu_logical_cores = cpus.len();
-    let cpu_cores = cpu_logical_cores;
+    // 物理核心数：sysinfo 不直接提供，用逻辑核心数/2 估算（超线程时逻辑数是物理数的 2 倍）
+    // 至少为 1，避免 0 核心
+    let cpu_cores = if cpu_logical_cores > 1 {
+        (cpu_logical_cores + 1) / 2
+    } else {
+        1
+    };
 
     let mem_total = sys.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0;
     let mem_type = "未知".into();
@@ -228,6 +237,7 @@ fn get_hardware_info() -> HardwarePayload {
         .map(|d| {
             let cap = d.total_space() as f64 / 1024.0 / 1024.0 / 1024.0;
             let name = d.name().to_string_lossy().into_owned();
+            // 优先通过 WMI 查询磁盘类型（见下方 Windows 分支），这里用名称兜底
             let dtype = if name.to_lowercase().contains("ssd") {
                 "SSD".into()
             } else if name.to_lowercase().contains("hdd") {
@@ -259,6 +269,7 @@ fn get_hardware_info() -> HardwarePayload {
         model: "未知".into(),
         cycles: 0,
         health: 0,
+        level: 0,
     };
 
     // Windows 平台：通过 PowerShell + WMI 查询 GPU / 主板 / 电池信息
@@ -289,13 +300,14 @@ fn get_hardware_info() -> HardwarePayload {
         }
 
         // 电池信息：Win32_Battery（笔记本才有）
+        // EstimatedChargeRemaining 是剩余电量百分比，不是健康度
         if let Some(out) = run_powershell("Get-CimInstance Win32_Battery | Select-Object -Property Name,EstimatedChargeRemaining | ConvertTo-Json -Compress") {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&out) {
                 if let Some(name) = parsed.get("Name").and_then(|v| v.as_str()) {
                     battery.model = name.to_string();
                 }
                 if let Some(charge) = parsed.get("EstimatedChargeRemaining").and_then(|v| v.as_u64()) {
-                    battery.health = charge as u32;
+                    battery.level = charge as u32;
                 }
             }
         }
@@ -316,12 +328,53 @@ fn get_hardware_info() -> HardwarePayload {
 fn run_shell(command: String, args: Vec<String>) -> Result<ShellResult, String> {
     use std::process::Command;
 
-    // 安全黑名单：禁止执行破坏性命令
+    // 安全黑名单：与前端 security.ts 保持一致，使用词边界正则避免误伤
+    // （如 del 不会误伤 delphi.exe，rd 不会误伤 keyboard）
+    const BLOCKED: &[&str] = &[
+        "format", "del", "rd", "rmdir", "mkfs", "dd",
+        "diskpart", "diskmgmt", "reg delete",
+        "shutdown", "taskkill /f /im explorer",
+        "remove-item", "rm", "cipher /w", "bcdedit",
+        "net user", "sc delete", "net stop", "takeown", "icacls",
+    ];
+    // 检查 command 本身
     let cmd_lower = command.to_lowercase();
-    let blocked = ["format", "del", "rd", "rmdir", "mkfs", "dd"];
-    for b in &blocked {
-        if cmd_lower.contains(b) {
+    for b in BLOCKED {
+        // 手动转义正则元字符
+        let escaped: String = b.chars().map(|c| {
+            if "\\^$.*+?()|[]{}".contains(c) {
+                format!("\\{}", c)
+            } else {
+                c.to_string()
+            }
+        }).collect();
+        let pattern = format!("\\b{}\\b", escaped);
+        if let Ok(re) = regex_lite::Regex::new(&pattern) {
+            if re.is_match(&cmd_lower) {
+                return Err(format!("安全拦截：禁止执行命令 {}", command));
+            }
+        } else if cmd_lower.contains(b) {
+            // 正则失败时降级为 contains
             return Err(format!("安全拦截：禁止执行命令 {}", command));
+        }
+    }
+    // 检查 args，避免通过 cmd /c "format C:" 绕过
+    let joined_args = args.join(" ").to_lowercase();
+    for b in BLOCKED {
+        let escaped: String = b.chars().map(|c| {
+            if "\\^$.*+?()|[]{}".contains(c) {
+                format!("\\{}", c)
+            } else {
+                c.to_string()
+            }
+        }).collect();
+        let pattern = format!("\\b{}\\b", escaped);
+        if let Ok(re) = regex_lite::Regex::new(&pattern) {
+            if re.is_match(&joined_args) {
+                return Err(format!("安全拦截：参数包含黑名单关键词 {}", b));
+            }
+        } else if joined_args.contains(b) {
+            return Err(format!("安全拦截：参数包含黑名单关键词 {}", b));
         }
     }
 
@@ -450,17 +503,17 @@ fn move_file(from: String, to: String) -> Result<(), String> {
     std::fs::rename(&from, &to).map_err(|e| format!("失败: {}", e))
 }
 
-/// 递归搜索文件名包含 pattern 的文件（最多返回 50 个）
+/// 递归搜索文件名包含 pattern 的文件（最多返回 50 个，深度限制 3 层）
 #[tauri::command]
 fn search_files(path: String, pattern: String) -> Result<Vec<String>, String> {
     let mut results = Vec::new();
     let pattern_lower = pattern.to_lowercase();
-    search_recursive(&path, &pattern_lower, &mut results, 50);
+    search_recursive(&path, &pattern_lower, &mut results, 50, 0, 3);
     Ok(results)
 }
 
-fn search_recursive(dir: &str, pattern_lower: &str, results: &mut Vec<String>, max: usize) {
-    if results.len() >= max {
+fn search_recursive(dir: &str, pattern_lower: &str, results: &mut Vec<String>, max: usize, depth: u32, max_depth: u32) {
+    if results.len() >= max || depth > max_depth {
         return;
     }
     let entries = match std::fs::read_dir(dir) {
@@ -477,15 +530,16 @@ fn search_recursive(dir: &str, pattern_lower: &str, results: &mut Vec<String>, m
             results.push(path.to_string_lossy().into_owned());
         }
         if path.is_dir() {
-            search_recursive(&path.to_string_lossy(), pattern_lower, results, max);
+            search_recursive(&path.to_string_lossy(), pattern_lower, results, max, depth + 1, max_depth);
         }
     }
 }
 
-/// 终止进程（系统关键进程白名单保护）
+/// 终止进程（系统关键进程白名单保护，14 个）
 #[tauri::command]
 fn kill_process(pid: u32) -> Result<(), String> {
     let sys = System::new_all();
+    // 14 个系统关键进程，终止会导致系统崩溃或需重启
     let protected = [
         "smss.exe",
         "csrss.exe",
@@ -496,6 +550,11 @@ fn kill_process(pid: u32) -> Result<(), String> {
         "explorer.exe",
         "system",
         "system idle process",
+        "wininit.exe",
+        "fontdrvhost.exe",
+        "dwm.exe",
+        "spoolsv.exe",
+        "fontdrvhost",
     ];
     if let Some(process) = sys.process(sysinfo::Pid::from_u32(pid)) {
         let name = process.name().to_string_lossy().to_lowercase();
@@ -799,10 +858,25 @@ fn screenshot() -> Result<String, String> {
 }
 
 /// 截取指定区域，返回 base64 PNG
+/// 验证坐标在屏幕范围内，避免越界 panic
 #[tauri::command]
 fn screenshot_region(x: i32, y: i32, width: u32, height: u32) -> Result<String, String> {
+    // 验证参数：x/y 非负，width/height 大于 0
+    if x < 0 || y < 0 || width == 0 || height == 0 {
+        return Err("截区域参数无效：x/y 不能为负，width/height 不能为 0".into());
+    }
     let full = capture_full_screen()?;
-    let cropped = image::imageops::crop_imm(&full, x as u32, y as u32, width, height).to_image();
+    let (img_w, img_h) = (full.width(), full.height());
+    let xu = x as u32;
+    let yu = y as u32;
+    // 越界检查：裁剪区域必须完全位于屏幕内
+    if xu >= img_w || yu >= img_h || xu + width > img_w || yu + height > img_h {
+        return Err(format!(
+            "截区域超出屏幕范围：屏幕 {}x{}, 请求 (x={},y={},w={},h={})",
+            img_w, img_h, x, y, width, height
+        ));
+    }
+    let cropped = image::imageops::crop_imm(&full, xu, yu, width, height).to_image();
     encode_png_base64(cropped)
 }
 
@@ -1128,6 +1202,8 @@ fn send_keys_fallback(key_code: u32) -> Result<(), String> {
 fn power_sleep() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        // 使用 spawn 但不等待，因为系统会立即挂起
+        // 若用 output() 等待，唤醒前程序无法返回，体验差
         std::process::Command::new("rundll32.exe")
             .args(["powrprof.dll,SetSuspendState", "0,1,0"])
             .spawn()
@@ -1145,9 +1221,11 @@ fn power_sleep() -> Result<(), String> {
 fn power_restart() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        // 用 status() 等待 shutdown 命令本身执行完毕（不等待系统重启）
+        // 确保 shutdown 命令已成功触发，避免前端误报"已重启"但实际未执行
         std::process::Command::new("shutdown")
             .args(["/r", "/t", "0"])
-            .spawn()
+            .status()
             .map_err(|e| format!("失败: {}", e))?;
         Ok(())
     }
@@ -1162,9 +1240,10 @@ fn power_restart() -> Result<(), String> {
 fn power_shutdown() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        // 用 status() 等待 shutdown 命令本身执行完毕，确保命令已成功触发
         std::process::Command::new("shutdown")
             .args(["/s", "/t", "0"])
-            .spawn()
+            .status()
             .map_err(|e| format!("失败: {}", e))?;
         Ok(())
     }
@@ -1277,7 +1356,8 @@ fn bluetooth_toggle(enable: bool) -> Result<(), String> {
 fn get_user_idle_seconds() -> Result<u64, String> {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::System::SystemInformation::GetTickCount;
+        // 使用 GetTickCount64（u64）避免 GetTickCount（u32）的 49.5 天溢出问题
+        use windows::Win32::System::SystemInformation::GetTickCount64;
         use windows::Win32::UI::Input::KeyboardAndMouse::GetLastInputInfo;
         use windows::Win32::UI::Input::KeyboardAndMouse::LASTINPUTINFO;
 
@@ -1287,9 +1367,11 @@ fn get_user_idle_seconds() -> Result<u64, String> {
                 dwTime: 0,
             };
             if GetLastInputInfo(&mut lii).as_bool() {
-                let now = GetTickCount();
-                let idle_ms = now.saturating_sub(lii.dwTime);
-                return Ok((idle_ms / 1000) as u64);
+                let now_ms = GetTickCount64();
+                // lii.dwTime 是 u32，与 GetTickCount64 同源（系统启动后的毫秒数）
+                let last_ms = lii.dwTime as u64;
+                let idle_ms = now_ms.saturating_sub(last_ms);
+                return Ok(idle_ms / 1000);
             }
             Err("GetLastInputInfo 失败".into())
         }
@@ -1301,20 +1383,26 @@ fn get_user_idle_seconds() -> Result<u64, String> {
 }
 
 /// 获取桌面路径（用于产出文件默认存放位置）
+/// 优先使用 PowerShell GetFolderPath（正确处理 OneDrive 重定向），环境变量降级
 #[tauri::command]
 fn get_desktop_path() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        // 优先用环境变量，失败时降级到 PowerShell
+        // 优先用 PowerShell：能正确处理 OneDrive 桌面重定向
+        if let Some(p) = run_powershell("[Environment]::GetFolderPath('Desktop')") {
+            let trimmed = p.trim().to_string();
+            if !trimmed.is_empty() && std::path::Path::new(&trimmed).exists() {
+                return Ok(trimmed);
+            }
+        }
+        // 降级：环境变量 %USERPROFILE%\Desktop
         if let Ok(profile) = std::env::var("USERPROFILE") {
             let desktop = format!("{}\\Desktop", profile);
             if std::path::Path::new(&desktop).exists() {
                 return Ok(desktop);
             }
         }
-        // 降级：通过 PowerShell 查询
-        run_powershell("[Environment]::GetFolderPath('Desktop')")
-            .ok_or_else(|| "无法获取桌面路径".into())
+        Err("无法获取桌面路径".into())
     }
     #[cfg(not(target_os = "windows"))]
     {
