@@ -396,15 +396,94 @@ export async function streamChat(options: StreamChatOptions): Promise<ChatResult
     conversationId,
   });
 
+  // Fallback：解析 content 中的内联 tool_call（与非流式保持一致）
+  // 流式累积的 content 可能包含 <tool_call>{json}</tool_call> 文本
+  let finalContent = content;
+  let finalToolCalls: any[] | undefined = toolCalls;
+  if ((!finalToolCalls || finalToolCalls.length === 0) && content) {
+    const parsed = parseInlineToolCalls(content);
+    if (parsed.length > 0) {
+      finalToolCalls = parsed.map((tc, i) => ({
+        id: `call_fallback_${Date.now()}_${i}`,
+        type: "function",
+        function: {
+          name: tc.name,
+          arguments: JSON.stringify(tc.args),
+        },
+      }));
+      finalContent = cleanInlineToolCalls(content).trim();
+    }
+  }
+
   const result: ChatResult = {
-    content,
+    content: finalContent,
     usage,
   };
   // 仅在有 tool_calls 时附加
-  if (toolCalls.length > 0) {
-    result.tool_calls = toolCalls;
+  if (finalToolCalls && finalToolCalls.length > 0) {
+    result.tool_calls = finalToolCalls;
   }
   return result;
+}
+
+// ---------- 内联 tool_call 解析（Fallback） ----------
+
+/**
+ * 从模型输出的文本中解析内联的 tool_call 标签
+ * 支持以下格式（Qwen / DeepSeek / Hermes / ChatML 等模型常用）：
+ *   <tool_call>{"name":"x","arguments":{...}}</tool_call>
+ *   <function_call>{"name":"x","arguments":{...}}</function_call>
+ *   <tool_call>\n{"name":"x","arguments":{...}}\n</tool_call>
+ *   裸 JSON（整段 content 就是 {"name":"x","arguments":{...}}）
+ * @returns 解析出的工具调用数组 { name, args }
+ */
+function parseInlineToolCalls(text: string): Array<{ name: string; args: Record<string, any> }> {
+  const results: Array<{ name: string; args: Record<string, any> }> = [];
+
+  // 1. 匹配 <tool_call>...</tool_call> / <function_call>...</function_call> 标签
+  //    DOTALL 让 . 匹配换行，非贪婪避免跨多个标签
+  const tagRegex = /<(?:tool_call|function_call)>\s*([\s\S]*?)\s*<\/(?:tool_call|function_call)>/g;
+  let m: RegExpExecArray | null;
+  while ((m = tagRegex.exec(text)) !== null) {
+    const parsed = tryParseToolJson(m[1]);
+    if (parsed) results.push(parsed);
+  }
+
+  // 2. 若标签匹配失败，尝试整段是否为裸 JSON 工具调用
+  if (results.length === 0) {
+    const trimmed = text.trim();
+    // 仅当看起来像工具调用 JSON（含 "name" 和 "arguments" 字段）才尝试
+    if (trimmed.startsWith("{") && /"name"\s*:/.test(trimmed) && /"arguments"\s*:/.test(trimmed)) {
+      const parsed = tryParseToolJson(trimmed);
+      if (parsed) results.push(parsed);
+    }
+  }
+
+  return results;
+}
+
+/** 尝试从 JSON 文本解析工具调用，兼容 {name, arguments} 和 {name, parameters} 两种字段名 */
+function tryParseToolJson(raw: string): { name: string; args: Record<string, any> } | null {
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object") return null;
+    const name = obj.name || obj.function?.name;
+    if (typeof name !== "string" || !name) return null;
+    // arguments / parameters 均可；可能为对象或 JSON 字符串
+    let args = obj.arguments ?? obj.parameters ?? obj.function?.arguments ?? {};
+    if (typeof args === "string") {
+      try { args = JSON.parse(args); } catch { /* 保持字符串 */ }
+    }
+    if (args === null || typeof args !== "object") args = {};
+    return { name, args };
+  } catch {
+    return null;
+  }
+}
+
+/** 移除文本中已解析的 tool_call / function_call 标签，保留剩余思考文本 */
+function cleanInlineToolCalls(text: string): string {
+  return text.replace(/<(?:tool_call|function_call)>[\s\S]*?<\/(?:tool_call|function_call)>/g, "");
 }
 
 // ---------- chatCompletion 非流式对话 ----------
@@ -455,10 +534,30 @@ export async function chatCompletion(
 
   const choice = data.choices?.[0];
   const message = choice?.message || {};
-  const content: string = message.content || "";
-  const toolCalls: any[] | undefined = Array.isArray(message.tool_calls)
+  let content: string = message.content || "";
+  let toolCalls: any[] | undefined = Array.isArray(message.tool_calls)
     ? message.tool_calls
     : undefined;
+
+  // Fallback：部分模型（如 Qwen / DeepSeek / Ollama 本地模型）不支持原生
+  // function calling，而是在 content 中以 <tool_call>{json}</tool_call> 文本
+  // 形式输出工具调用。这里解析这类伪 tool_call，转为标准 OpenAI tool_calls，
+  // 并从 content 中移除标签，避免污染 thinking 文本。
+  if ((!toolCalls || toolCalls.length === 0) && typeof content === "string") {
+    const parsed = parseInlineToolCalls(content);
+    if (parsed.length > 0) {
+      toolCalls = parsed.map((tc, i) => ({
+        id: `call_fallback_${Date.now()}_${i}`,
+        type: "function",
+        function: {
+          name: tc.name,
+          arguments: JSON.stringify(tc.args),
+        },
+      }));
+      // 移除已解析的 tool_call 标签，保留剩余的思考文本
+      content = cleanInlineToolCalls(content).trim();
+    }
+  }
 
   // usage 缺失则估算
   let usage: ChatResult["usage"];

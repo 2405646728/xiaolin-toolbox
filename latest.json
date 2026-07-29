@@ -1,11 +1,11 @@
 {
-  "version": "1.2.0",
-  "notes": "v1.2.0 更新内容\n\n【新增】自定义窗口标题栏\n- 移除系统默认白色标题栏，改为深色毛玻璃自定义标题栏\n- 左侧显示应用图标和名称，右侧最小化/最大化/关闭按钮\n- 整条标题栏可拖拽移动窗口\n\n【新增】启动自动检查更新\n- 应用启动后延迟 3 秒静默检查更新\n- 发现新版本弹出更新介绍弹窗，支持「立即下载安装」和「稍后再说」\n- 下载过程实时显示进度条，安装后自动重启\n\n【优化】标题栏图标替换为应用桌面图标，统一视觉风格",
-  "pub_date": "2026-07-30T11:00:00Z",
+  "version": "1.2.1",
+  "notes": "v1.2.1 更新内容\n\n【修复】本地模型（Qwen / DeepSeek / Ollama）无法调用工具的问题\n- 部分模型不支持原生 OpenAI Function Calling，会在文本中输出 <tool_call>{json}</tool_call> 标签\n- 现系统会自动解析这类内联工具调用并转为标准格式执行\n- 流式和非流式对话均已支持 fallback 解析\n\n【优化】系统提示词补充工具调用格式说明\n- 明确告知模型应使用 <tool_call> 标签输出工具调用\n- 禁止编造假的截图链接、markdown 图片、执行结果",
+  "pub_date": "2026-07-30T12:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTYmxhRzF2WEYvemVUVUJmckVFcTJCZXhkSjBaQ3VsT1N2V1YyVE1hWGE1OVhteThLYnJ6d1l6Q3JwSFIwc3ZUSUtPUVB2SysvTk1YS3dhSFlLejJvVURNclRUWEkvdkF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MzQxNDE4CWZpbGU65bCP5p6XIEFJXzEuMi4wX3g2NC1zZXR1cC5leGUKWE8vZDVaT1V1ZTZVYkpZaVVza3puTlQxNFFMMXdSWE9BR1huVkJVdkdudnlNV1NMb0x1amZkWHVOV1REMUdkVXdQcXhteUdDVTd3ZFdhQWdTU0ZhQkE9PQo=",
-      "url": "https://github.com/2405646728/xiaolin-toolbox/releases/download/v1.2.0/xiaolin-ai_1.2.0_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTYmxhRzF2WEYvelJJS0dxaU5YTDYxWDNCNFpnMlF5WFZEY3Y2U2I3eEkvaUJyeVVnM0ZpQlNrTytqZDdYeWFadnNjZ3ArbEIra2FGNjgvc1hPUVlYblYwYW5kRUFVVlE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MzQ2NDU0CWZpbGU65bCP5p6XIEFJXzEuMi4xX3g2NC1zZXR1cC5leGUKeHBPQm9jd0ZNOEN5NXdVYXRXcE5GSjVkZkNmOXM2UVAzcjg0R3dmT2swaTVKZnBlTlUyV3VQZ3VaaGNpc2pqQTdvczN1RHBEdVBGSUVZUTh3bHhUQkE9PQo=",
+      "url": "https://github.com/2405646728/xiaolin-toolbox/releases/download/v1.2.1/xiaolin-ai_1.2.1_x64-setup.exe"
     }
   }
 }
