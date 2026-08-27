@@ -120,7 +120,8 @@ export function loadLLMConfig(): LLMConfig | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as LLMConfig;
     // 基础校验，字段缺失视为未配置
-    if (!parsed.baseUrl || !parsed.apiKey || !parsed.model) return null;
+    // 允许空 API Key：本地 Ollama / 无需鉴权的 OpenAI 兼容端点可正常工作
+    if (!parsed.baseUrl || !parsed.model) return null;
     return parsed;
   } catch {
     return null;

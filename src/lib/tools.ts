@@ -803,6 +803,16 @@ export async function executeTool(
   args: Record<string, any>,
   context?: ToolCallContext
 ): Promise<ToolExecutionResult> {
+  // 0. 参数规范化：工具定义允许省略可选参数，但 Rust 命令要求这些字段存在
+  //    - run_shell: args 可选，缺省为 []
+  //    - mouse_click: button 可选，缺省为 left
+  if (name === "run_shell" && !Array.isArray(args.args)) {
+    args.args = [];
+  }
+  if (name === "mouse_click" && typeof args.button !== "string") {
+    args.button = "left";
+  }
+
   // 1. 危险工具二次确认（通过 context.requiresConfirmation 或默认 requiresConfirmation 判断）
   const needConfirm = context?.requiresConfirmation
     ? context.requiresConfirmation(name)
@@ -851,6 +861,7 @@ export async function executeTool(
         try {
           await invoke("run_shell", {
             command: `if (!(Test-Path '${escapedDir}')) { New-Item -ItemType Directory -Path '${escapedDir}' -Force | Out-Null }`,
+            args: [],
           });
         } catch {
           // 目录创建失败不阻断，write_file 会报错

@@ -1367,10 +1367,12 @@ fn get_user_idle_seconds() -> Result<u64, String> {
                 dwTime: 0,
             };
             if GetLastInputInfo(&mut lii).as_bool() {
+                // GetTickCount64() 是 u64 系统启动毫秒数，超过约 49.7 天也不会回绕；
+                // 但 LASTINPUTINFO.dwTime 是 u32（来自 32 位 GetTickCount），会在约 49.7 天回绕。
+                // 因此取 GetTickCount64 的低 32 位与 dwTime 做 32 位环绕减法，避免长时间开机后误判“空闲”。
                 let now_ms = GetTickCount64();
-                // lii.dwTime 是 u32，与 GetTickCount64 同源（系统启动后的毫秒数）
-                let last_ms = lii.dwTime as u64;
-                let idle_ms = now_ms.saturating_sub(last_ms);
+                let now32 = (now_ms & 0xFFFF_FFFF) as u32;
+                let idle_ms = now32.wrapping_sub(lii.dwTime) as u64;
                 return Ok(idle_ms / 1000);
             }
             Err("GetLastInputInfo 失败".into())

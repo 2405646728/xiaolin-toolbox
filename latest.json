@@ -1,11 +1,11 @@
 {
-  "version": "1.2.2",
-  "notes": "v1.2.2 更新内容\n\n【优化】安装器界面品牌化升级\n- 安装/卸载界面新增品牌侧边图（164x314）：深色玻璃背景 + 绿色霓虹光晕 + 品牌 logo + 功能列表 + 公司信息\n- 顶部品牌条（150x57）：横向渐变背景 + 绿色光带 + 品牌名\n- 风格与应用 iOS 26 液态玻璃设计语言统一",
-  "pub_date": "2026-07-30T13:00:00Z",
+  "version": "1.2.3",
+  "notes": "v1.2.3 修复内容\n\n【修复】\n- 修复 run_shell / mouse_click / write_file 因可选参数缺失导致的调用失败\n- 修复长时间开机后用户空闲时间误判的问题（GUI 工具排队策略更准确）\n- 修复 TitleBar 导致 ESLint 报错的问题\n- 允许无 API Key 的本地/兼容端点正常走模型模式\n- 修复自动更新 latest.json 下载地址与实际产物名不匹配的问题",
+  "pub_date": "2026-08-27T13:06:04Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTYmxhRzF2WEYveldwMHl6RmhoSUNZcmkvTGptRjFQam1rVzZ5YXEyaW1DcllLOTF6bGh1NnBJMjdhOEFFUzVUdW0xNVpQaXF0c2hHWmhkU2Y1VTlMamVTVENyWHNLR3dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MzUwMzg3CWZpbGU65bCP5p6XIEFJXzEuMi4yX3g2NC1zZXR1cC5leGUKWVJkcXJ2bXQrVU9aeWtqc3UwYVFQUnVDQW5iUnZ3N2tGWVVkS0F0RzRyWVEza1dUWTllYndhNWVqc1F2U2c5M3pWWXJKS3dVTlFaU1lJVW5CM0dLRFE9PQo=",
-      "url": "https://github.com/2405646728/xiaolin-toolbox/releases/download/v1.2.2/xiaolin-ai_1.2.2_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTYmxhRzF2WEYvelE3VlZMSFpESEpLZm1FWFl3Q3gxUFBMM044K1JkRlFmbldreXVnOFZDOXhUaGRtK3kyYjRXeHRvdjBpdG5rdUdOVFdxS0ZnWWErUngxZ2FCZDNvMmdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3ODM1OTY0CWZpbGU65bCP5p6XIEFJXzEuMi4zX3g2NC1zZXR1cC5leGUKeHhmVVNrZnlsVmxBOGtYakQrY0k1M0s3c25pUjEwdENoNmJod3ljckRTNXVKNXdvcWdOeGZnTE1QNEdOMXB3TklkdThYcVQ0aFJHUXZNcXJBRXM0Q0E9PQo=",
+      "url": "https://github.com/2405646728/xiaolin-toolbox/releases/download/v1.2.3/%E5%B0%8F%E6%9E%97%20AI_1.2.3_x64-setup.exe"
     }
   }
 }

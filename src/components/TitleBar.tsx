@@ -16,10 +16,10 @@ export function TitleBar() {
   useEffect(() => {
     if (!isTauri) return;
     let unlisten: (() => void) | undefined;
-    (async () => {
+    void (async () => {
       try {
         const appWindow = await import("@tauri-apps/api/window");
-        const win = await appWindow.getCurrentWindow();
+        const win = appWindow.getCurrentWindow();
         // 初始读取
         setMaximized(await win.isMaximized());
         // 监听resize事件（最大化/还原会触发）
@@ -38,7 +38,7 @@ export function TitleBar() {
     if (!isTauri) return;
     try {
       const appWindow = await import("@tauri-apps/api/window");
-      await (await appWindow.getCurrentWindow()).minimize();
+      await appWindow.getCurrentWindow().minimize();
     } catch { /* 静默 */ }
   };
 
@@ -46,7 +46,7 @@ export function TitleBar() {
     if (!isTauri) return;
     try {
       const appWindow = await import("@tauri-apps/api/window");
-      await (await appWindow.getCurrentWindow()).toggleMaximize();
+      await appWindow.getCurrentWindow().toggleMaximize();
     } catch { /* 静默 */ }
   };
 
@@ -54,7 +54,7 @@ export function TitleBar() {
     if (!isTauri) return;
     try {
       const appWindow = await import("@tauri-apps/api/window");
-      await (await appWindow.getCurrentWindow()).close();
+      await appWindow.getCurrentWindow().close();
     } catch { /* 静默 */ }
   };
 
@@ -84,7 +84,7 @@ export function TitleBar() {
         {/* 最小化 */}
         <motion.button
           type="button"
-          onClick={handleMinimize}
+          onClick={() => void handleMinimize()}
           whileHover={{ backgroundColor: "rgba(255,255,255,0.08)" }}
           whileTap={{ backgroundColor: "rgba(255,255,255,0.04)" }}
           className="flex w-11 items-center justify-center text-argent-300 transition-colors hover:text-white"
@@ -96,7 +96,7 @@ export function TitleBar() {
         {/* 最大化/还原 */}
         <motion.button
           type="button"
-          onClick={handleToggleMaximize}
+          onClick={() => void handleToggleMaximize()}
           whileHover={{ backgroundColor: "rgba(255,255,255,0.08)" }}
           whileTap={{ backgroundColor: "rgba(255,255,255,0.04)" }}
           className="flex w-11 items-center justify-center text-argent-300 transition-colors hover:text-white"
@@ -112,7 +112,7 @@ export function TitleBar() {
         {/* 关闭 */}
         <motion.button
           type="button"
-          onClick={handleClose}
+          onClick={() => void handleClose()}
           whileHover={{ backgroundColor: "rgba(248,113,113,0.85)" }}
           whileTap={{ backgroundColor: "rgba(220,92,92,0.9)" }}
           className="flex w-11 items-center justify-center text-argent-300 transition-colors hover:text-white"
