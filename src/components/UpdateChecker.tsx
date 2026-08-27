@@ -54,7 +54,8 @@ export function UpdateChecker() {
           });
           setShowDialog(true);
         }
-      } catch {
+      } catch (e) {
+        console.error("启动自动检查更新失败:", e);
         // 静默失败，不打扰用户
       }
     }, 3000);

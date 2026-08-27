@@ -1,11 +1,11 @@
 {
-  "version": "1.2.3",
-  "notes": "v1.2.3 修复内容\n\n【修复】\n- 修复 run_shell / mouse_click / write_file 因可选参数缺失导致的调用失败\n- 修复长时间开机后用户空闲时间误判的问题（GUI 工具排队策略更准确）\n- 修复 TitleBar 导致 ESLint 报错的问题\n- 允许无 API Key 的本地/兼容端点正常走模型模式\n- 修复自动更新 latest.json 下载地址与实际产物名不匹配的问题",
-  "pub_date": "2026-08-27T13:06:04Z",
+  "version": "1.2.4",
+  "notes": "v1.2.4 更新内容\n\n【修复与优化】\n- 自动更新改为多端点兜底（GitHub Release + raw.githubusercontent.com），提升更新成功率\n- 「检查更新失败」现在会显示真实错误原因并在日志中记录，便于排查\n- 含 v1.2.3 已修复的工具参数缺省、空闲时间精度、更新地址等问题",
+  "pub_date": "2026-08-27T13:36:04Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTYmxhRzF2WEYvemYrYU1iOUJEa0lRMUhwSTFYMUFnbUFTSVM2RElTUFExaUtKR3hyeTNTMm5kcXFGdHlOZHZVNnVSVTUxaU83SVBMZmtEVzl3czRFTVZmWnd5RFdhc3dZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3ODM2NDUwCWZpbGU6QUlfMS4yLjNfeDY0LXNldHVwLmV4ZQptWU4yWDR2dk81RWwzYWt6RHF2akpTK3NUbkZNNXo3aW1oSy9mb0pHZVA0a21MejN5MmN2aWRYcm9aY1hVd1BiTnptMncrcFowSnd6Q3Ewdmw2T3hDdz09Cg==",
-      "url": "https://github.com/2405646728/xiaolin-toolbox/releases/download/v1.2.3/AI_1.2.3_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTYmxhRzF2WEYvemIvZGU2WXNhbXI4UnpqdzF4OTVjUHpVdmp5V0RFZnc3NW5LZElnakF4UW5mbzgxU0s5WVBWei9QSXFkYnA1bFU5TkpHZ0tsWGlEWmU5SDhXVkZnZ3d3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3ODM3NzY0CWZpbGU6QUlfMS4yLjRfeDY0LXNldHVwLmV4ZQo1TEt5b2I4ckF5VGF2eGMyZGR0K0JmSitOMXV4a0FEbWd5TmxDME1HRjl6Wlg0VnN4QTJvTG1zVmwrQkVYNUVUMkhzMUlqU0RnZllXSXVOc29vektDQT09Cg==",
+      "url": "https://github.com/2405646728/xiaolin-toolbox/releases/download/v1.2.4/AI_1.2.4_x64-setup.exe"
     }
   }
 }

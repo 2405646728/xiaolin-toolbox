@@ -984,8 +984,9 @@ function AboutTab() {
         });
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "检查更新失败";
-      setUpdateInfo({ available: false, message: msg });
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : "检查更新失败");
+      console.error("检查更新失败:", e);
+      setUpdateInfo({ available: false, message: `检查更新失败：${msg}` });
     } finally {
       setChecking(false);
     }
